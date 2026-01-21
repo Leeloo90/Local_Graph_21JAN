@@ -171,31 +171,48 @@ app.whenReady().then(() => {
           playback_rate: 1.0
         })
       } else {
-        // Case B: Create node with specified anchor type
-        // Map drop zone types to DB anchor types
+        // Case B: Create node with Type Propagation rules (Doc E - Fractal Topology)
+        // Lane 0 = Spine, Lane > 0 = Satellite
+        const targetLane = parentNode.ui_track_lane ?? 0
+        const targetIsSpine = targetLane === 0
+
         let dbAnchorType: 'APPEND' | 'TOP' | 'PREPEND' = 'APPEND'
         let nodeType: 'SPINE' | 'SATELLITE' = 'SPINE'
-        let trackLane = parentNode.ui_track_lane ?? 0 // Inherit parent's track by default
+        let trackLane = 0
 
         if (anchorType === 'stack') {
-          // Stack creates a SATELLITE above the parent (Doc G: V(n+1))
-          // Track lane increments: parent on V1 (lane 0) -> child on V2 (lane 1)
+          // Stack (TOP anchor) always creates a SATELLITE one lane higher
           dbAnchorType = 'TOP'
           nodeType = 'SATELLITE'
-          trackLane = (parentNode.ui_track_lane ?? 0) + 1
+          trackLane = targetLane + 1
           console.log(
-            `[Node] Stack: Creating SATELLITE on V${trackLane + 1} above node ${parentNode.id} (V${(parentNode.ui_track_lane ?? 0) + 1})`
+            `[Node] Stack: Creating SATELLITE on V${trackLane + 1} above ${targetIsSpine ? 'SPINE' : 'SATELLITE'} ${parentNode.id} (V${targetLane + 1})`
           )
         } else if (anchorType === 'prepend') {
           dbAnchorType = 'PREPEND'
-          // Prepend stays on the same track as target
-          trackLane = parentNode.ui_track_lane ?? 0
-          console.log(`[Node] Prepend: Before node ${parentNode.id} on V${trackLane + 1}`)
+          if (targetIsSpine) {
+            // Prepend on Spine: new node is SPINE on lane 0
+            nodeType = 'SPINE'
+            trackLane = 0
+          } else {
+            // Prepend on Satellite: new node is SATELLITE on same lane
+            nodeType = 'SATELLITE'
+            trackLane = targetLane
+          }
+          console.log(`[Node] Prepend: ${nodeType} before ${parentNode.id} on V${trackLane + 1}`)
         } else {
-          // Append stays on the same track as target
+          // Append (default)
           dbAnchorType = 'APPEND'
-          trackLane = parentNode.ui_track_lane ?? 0
-          console.log(`[Node] Append: After node ${parentNode.id} on V${trackLane + 1}`)
+          if (targetIsSpine) {
+            // Append on Spine: new node is SPINE on lane 0
+            nodeType = 'SPINE'
+            trackLane = 0
+          } else {
+            // Append on Satellite: new node is SATELLITE on same lane
+            nodeType = 'SATELLITE'
+            trackLane = targetLane
+          }
+          console.log(`[Node] Append: ${nodeType} after ${parentNode.id} on V${trackLane + 1}`)
         }
 
         return createNode({

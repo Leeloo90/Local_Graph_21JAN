@@ -6,6 +6,7 @@ import {
   type DropZone,
   NODE_HEIGHT
 } from '../utils/layout'
+import { deriveTimeline, formatTimecode, type TimelineState } from '../utils/timeline'
 
 interface EditorProps {
   projectId: string
@@ -150,7 +151,7 @@ function Editor({
 
           {/* ZONE C: The Timeline (Temporal Floor - X-Axis) */}
           <div style={styles.timelinePanel}>
-            <TimelinePanel />
+            <TimelinePanel nodes={nodes} fps={canvas?.fps ?? 24} />
           </div>
         </div>
 
@@ -789,27 +790,229 @@ function GraphPanel({
   )
 }
 
-function TimelinePanel(): React.JSX.Element {
+interface TimelinePanelProps {
+  nodes: StoryNode[]
+  fps: number
+}
+
+function TimelinePanel({ nodes, fps }: TimelinePanelProps): React.JSX.Element {
+  const trackAreaRef = useRef<HTMLDivElement>(null)
+  const [timeScale, setTimeScale] = useState(50) // Pixels per second
+  const [currentTime, setCurrentTime] = useState(0) // Playhead position in seconds
+  const [scrollLeft, setScrollLeft] = useState(0)
+
+  // Derive timeline from graph topology (Doc F)
+  const timeline: TimelineState = useMemo(() => deriveTimeline(nodes), [nodes])
+
+  // Calculate total width needed for the timeline
+  const totalWidth = Math.max(timeline.totalDuration * timeScale, 800)
+
+  // Generate ruler ticks
+  const rulerTicks = useMemo(() => {
+    const ticks: { position: number; label: string; isMajor: boolean }[] = []
+    const duration = Math.max(timeline.totalDuration, 10) // Minimum 10 seconds shown
+    const tickInterval = timeScale >= 40 ? 1 : timeScale >= 20 ? 2 : 5 // Seconds between ticks
+
+    for (let t = 0; t <= duration + tickInterval; t += tickInterval) {
+      const isMajor = t % (tickInterval * 5) === 0
+      ticks.push({
+        position: t * timeScale,
+        label: isMajor ? formatTimecode(t, fps) : '',
+        isMajor
+      })
+    }
+    return ticks
+  }, [timeline.totalDuration, timeScale, fps])
+
+  // Handle ruler click to set playhead
+  const handleRulerClick = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      const rect = e.currentTarget.getBoundingClientRect()
+      const x = e.clientX - rect.left + scrollLeft
+      const time = x / timeScale
+      setCurrentTime(Math.max(0, time))
+    },
+    [timeScale, scrollLeft]
+  )
+
+  // Handle scroll sync
+  const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    setScrollLeft(e.currentTarget.scrollLeft)
+  }, [])
+
+  // Zoom controls
+  const handleZoomIn = useCallback(() => {
+    setTimeScale((prev) => Math.min(prev * 1.25, 200))
+  }, [])
+
+  const handleZoomOut = useCallback(() => {
+    setTimeScale((prev) => Math.max(prev * 0.8, 10))
+  }, [])
+
   return (
     <div style={timelineStyles.container}>
+      {/* Header with timecode and controls */}
       <div style={timelineStyles.header}>
         <span style={timelineStyles.title}>Temporal Floor</span>
-        <div style={timelineStyles.timecode}>00:00:00:00</div>
+        <div style={timelineStyles.headerControls}>
+          <button style={timelineStyles.zoomBtn} onClick={handleZoomOut} title="Zoom Out">
+            -
+          </button>
+          <span style={timelineStyles.scaleLabel}>{timeScale}px/s</span>
+          <button style={timelineStyles.zoomBtn} onClick={handleZoomIn} title="Zoom In">
+            +
+          </button>
+        </div>
+        <div style={timelineStyles.timecode}>{formatTimecode(currentTime, fps)}</div>
       </div>
-      <div style={timelineStyles.tracks}>
-        <div style={timelineStyles.trackLabel}>V3</div>
-        <div style={timelineStyles.trackLane} />
-        <div style={timelineStyles.trackLabel}>V2</div>
-        <div style={timelineStyles.trackLane} />
-        <div style={timelineStyles.trackLabel}>V1</div>
-        <div style={{ ...timelineStyles.trackLane, backgroundColor: '#252526' }} />
-        <div style={timelineStyles.trackLabel}>A1</div>
-        <div style={timelineStyles.trackLane} />
+
+      {/* Timeline body */}
+      <div style={timelineStyles.body}>
+        {/* Track labels column (fixed) */}
+        <div style={timelineStyles.trackLabelsColumn}>
+          {timeline.rows.map((row) => (
+            <div
+              key={row.id}
+              style={{
+                ...timelineStyles.trackLabel,
+                backgroundColor: row.label === 'V1' ? '#252526' : '#1a1a1a'
+              }}
+            >
+              {row.label}
+            </div>
+          ))}
+        </div>
+
+        {/* Scrollable track area */}
+        <div style={timelineStyles.trackAreaWrapper} onScroll={handleScroll} ref={trackAreaRef}>
+          {/* Ruler */}
+          <div
+            style={{ ...timelineStyles.ruler, width: `${totalWidth}px` }}
+            onClick={handleRulerClick}
+          >
+            {rulerTicks.map((tick, i) => (
+              <div
+                key={i}
+                style={{
+                  position: 'absolute',
+                  left: `${tick.position}px`,
+                  top: 0,
+                  height: '100%',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center'
+                }}
+              >
+                <div
+                  style={{
+                    width: '1px',
+                    height: tick.isMajor ? '12px' : '6px',
+                    backgroundColor: tick.isMajor ? '#606060' : '#3c3c3c'
+                  }}
+                />
+                {tick.label && (
+                  <span
+                    style={{
+                      fontSize: '9px',
+                      color: '#606060',
+                      marginTop: '2px',
+                      whiteSpace: 'nowrap'
+                    }}
+                  >
+                    {tick.label}
+                  </span>
+                )}
+              </div>
+            ))}
+
+            {/* Playhead on ruler */}
+            <div
+              style={{
+                position: 'absolute',
+                left: `${currentTime * timeScale}px`,
+                top: 0,
+                width: '2px',
+                height: '100%',
+                backgroundColor: '#ef4444',
+                zIndex: 10
+              }}
+            />
+          </div>
+
+          {/* Track lanes */}
+          <div style={{ ...timelineStyles.trackLanes, width: `${totalWidth}px` }}>
+            {timeline.rows.map((row) => (
+              <div
+                key={row.id}
+                style={{
+                  ...timelineStyles.trackLane,
+                  backgroundColor: row.label === 'V1' ? '#252526' : '#1e1e1e'
+                }}
+              >
+                {/* Render clips in this track */}
+                {row.clips.map((clip) => (
+                  <div
+                    key={clip.id}
+                    style={{
+                      position: 'absolute',
+                      left: `${clip.start * timeScale}px`,
+                      width: `${(clip.end - clip.start) * timeScale}px`,
+                      top: '4px',
+                      bottom: '4px',
+                      backgroundColor: clip.color,
+                      borderRadius: '3px',
+                      border: '1px solid rgba(255, 255, 255, 0.1)',
+                      overflow: 'hidden',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      paddingLeft: '6px'
+                    }}
+                    title={`${clip.name} (${clip.duration.toFixed(2)}s)`}
+                  >
+                    <span
+                      style={{
+                        fontSize: '10px',
+                        fontWeight: 500,
+                        color: 'rgba(255, 255, 255, 0.9)',
+                        whiteSpace: 'nowrap',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis'
+                      }}
+                    >
+                      {clip.name}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ))}
+
+            {/* Playhead line across tracks */}
+            <div
+              style={{
+                position: 'absolute',
+                left: `${currentTime * timeScale}px`,
+                top: 0,
+                width: '2px',
+                height: '100%',
+                backgroundColor: '#ef4444',
+                zIndex: 10,
+                pointerEvents: 'none'
+              }}
+            />
+          </div>
+        </div>
       </div>
-      <div style={timelineStyles.placeholder}>
-        <p style={timelineStyles.placeholderText}>Timeline View (Doc F)</p>
-        <p style={timelineStyles.placeholderHint}>X-AXIS: Time & Sequence</p>
-      </div>
+
+      {/* Empty state */}
+      {nodes.length === 0 && (
+        <div style={timelineStyles.emptyState}>
+          <p style={timelineStyles.emptyText}>Timeline View (Doc F)</p>
+          <p style={timelineStyles.emptyHint}>
+            Drop media on the Graph to see clips here
+          </p>
+        </div>
+      )}
     </div>
   )
 }
@@ -1354,7 +1557,9 @@ const timelineStyles: Record<string, React.CSSProperties> = {
   container: {
     display: 'flex',
     flexDirection: 'column',
-    height: '100%'
+    height: '100%',
+    position: 'relative',
+    overflow: 'hidden'
   },
   header: {
     display: 'flex',
@@ -1362,7 +1567,34 @@ const timelineStyles: Record<string, React.CSSProperties> = {
     justifyContent: 'space-between',
     padding: '6px 12px',
     backgroundColor: '#252526',
-    borderBottom: '1px solid #3c3c3c'
+    borderBottom: '1px solid #3c3c3c',
+    flexShrink: 0,
+    zIndex: 10
+  },
+  headerControls: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px'
+  },
+  zoomBtn: {
+    width: '20px',
+    height: '20px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#1e1e1e',
+    border: '1px solid #3c3c3c',
+    borderRadius: '3px',
+    color: '#808080',
+    fontSize: '12px',
+    fontWeight: 600,
+    cursor: 'pointer'
+  },
+  scaleLabel: {
+    fontSize: '9px',
+    color: '#606060',
+    minWidth: '45px',
+    textAlign: 'center' as const
   },
   title: {
     fontSize: '10px',
@@ -1374,41 +1606,72 @@ const timelineStyles: Record<string, React.CSSProperties> = {
   timecode: {
     fontSize: '11px',
     fontFamily: 'monospace',
-    color: '#0e639c'
+    color: '#ef4444',
+    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+    padding: '2px 6px',
+    borderRadius: '3px'
   },
-  tracks: {
-    display: 'grid',
-    gridTemplateColumns: '32px 1fr',
+  body: {
+    display: 'flex',
     flex: 1,
-    overflow: 'hidden'
+    overflow: 'hidden',
+    minHeight: 0
+  },
+  trackLabelsColumn: {
+    width: '36px',
+    flexShrink: 0,
+    display: 'flex',
+    flexDirection: 'column',
+    backgroundColor: '#1a1a1a',
+    borderRight: '1px solid #3c3c3c',
+    paddingTop: '24px' // Space for ruler
   },
   trackLabel: {
+    height: '36px',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
     fontSize: '9px',
     fontWeight: 600,
-    color: '#4a4a4a',
-    backgroundColor: '#1a1a1a',
+    color: '#606060',
     borderBottom: '1px solid #2d2d2d'
+  },
+  trackAreaWrapper: {
+    flex: 1,
+    overflow: 'auto',
+    position: 'relative'
+  },
+  ruler: {
+    height: '24px',
+    backgroundColor: '#1a1a1a',
+    borderBottom: '1px solid #3c3c3c',
+    position: 'relative',
+    cursor: 'pointer'
+  },
+  trackLanes: {
+    display: 'flex',
+    flexDirection: 'column',
+    position: 'relative'
   },
   trackLane: {
-    backgroundColor: '#1e1e1e',
+    height: '36px',
+    position: 'relative',
     borderBottom: '1px solid #2d2d2d'
   },
-  placeholder: {
+  emptyState: {
     position: 'absolute',
     top: '50%',
     left: '50%',
     transform: 'translate(-50%, -50%)',
-    textAlign: 'center'
+    textAlign: 'center',
+    pointerEvents: 'none'
   },
-  placeholderText: {
+  emptyText: {
     fontSize: '11px',
     color: '#4a4a4a',
     margin: 0
   },
-  placeholderHint: {
+  emptyHint: {
     fontSize: '9px',
     color: '#3c3c3c',
     marginTop: '4px'
