@@ -1,0 +1,207 @@
+/* Workspace Layout - VS Code / Premiere Pro Style */
+
+.workspace {
+  display: grid;
+  grid-template-columns: 250px 1fr 300px;
+  grid-template-rows: 40px 1fr;
+  grid-template-areas:
+    "toolbar toolbar toolbar"
+    "sidebar canvas inspector";
+  width: 100vw;
+  height: 100vh;
+  background-color: #1e1e1e;
+  color: #cccccc;
+  overflow: hidden;
+}
+
+/* Toolbar - Top Bar */
+.workspace-toolbar {
+  grid-area: toolbar;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  background-color: #323233;
+  border-bottom: 1px solid #1a1a1a;
+}
+
+.workspace-toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.workspace-toolbar-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: #ffffff;
+}
+
+.workspace-toolbar-subtitle {
+  font-size: 11px;
+  color: #808080;
+}
+
+.workspace-back-btn {
+  padding: 4px 10px;
+  background-color: transparent;
+  border: 1px solid #464647;
+  border-radius: 3px;
+  color: #808080;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.workspace-back-btn:hover {
+  background-color: #3c3c3c;
+  color: #cccccc;
+  border-color: #6c6c6c;
+}
+
+/* Sidebar - Left Panel (Media Bin) */
+.workspace-sidebar {
+  grid-area: sidebar;
+  display: flex;
+  flex-direction: column;
+  background-color: #252526;
+  border-right: 1px solid #1a1a1a;
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Canvas - Center Panel - CRITICAL: min-width/height prevent grid collapse */
+.workspace-canvas {
+  grid-area: canvas;
+  background-color: #1e1e1e;
+  overflow: hidden;
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Inspector - Right Panel */
+.workspace-inspector {
+  grid-area: inspector;
+  display: flex;
+  flex-direction: column;
+  background-color: #252526;
+  border-left: 1px solid #1a1a1a;
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Panel Headers */
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background-color: #2d2d2d;
+  border-bottom: 1px solid #1a1a1a;
+  min-height: 32px;
+}
+
+.panel-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #bbbbbb;
+}
+
+.panel-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.panel-btn {
+  padding: 4px 8px;
+  background-color: transparent;
+  border: none;
+  border-radius: 3px;
+  color: #808080;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.panel-btn:hover {
+  background-color: #3c3c3c;
+  color: #cccccc;
+}
+
+.panel-btn-primary {
+  background-color: #0e639c;
+  color: #ffffff;
+}
+
+.panel-btn-primary:hover {
+  background-color: #1177bb;
+}
+
+.panel-btn-primary:disabled {
+  background-color: #3c3c3c;
+  color: #666666;
+  cursor: not-allowed;
+}
+
+/* Panel Content */
+.panel-content {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* Scrollbar Styling */
+.panel-content::-webkit-scrollbar {
+  width: 10px;
+}
+
+.panel-content::-webkit-scrollbar-track {
+  background: #1e1e1e;
+}
+
+.panel-content::-webkit-scrollbar-thumb {
+  background: #424242;
+  border-radius: 5px;
+}
+
+.panel-content::-webkit-scrollbar-thumb:hover {
+  background: #4f4f4f;
+}
+
+/* Empty State */
+.panel-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 24px;
+  text-align: center;
+  color: #606060;
+}
+
+.panel-empty-text {
+  font-size: 12px;
+  margin: 0;
+}
+
+.panel-empty-hint {
+  font-size: 11px;
+  margin-top: 4px;
+  color: #4a4a4a;
+}
+
+/* Loading State */
+.panel-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #606060;
+  font-size: 12px;
+}
