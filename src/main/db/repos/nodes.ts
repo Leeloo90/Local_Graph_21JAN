@@ -313,6 +313,7 @@ export function getNodeById(nodeId: string): StoryNode | null {
       anchor_type,
       container_id,
       drift,
+      ui_track_lane,
       media_in_point,
       media_out_point,
       playback_rate,

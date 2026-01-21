@@ -6,7 +6,7 @@ import { initializeDatabase } from './db/init'
 import { createProject, getAllProjects } from './db/repos/projects'
 import { addMediaToProject, getProjectMedia, type Media } from './db/repos/media'
 import { createCanvas, getProjectCanvases, getCanvasById } from './db/repos/canvases'
-import { getNodesByCanvasId, createNode, getSpineTail } from './db/repos/nodes'
+import { getNodesByCanvasId, createNode, getSpineTail, getNodeById } from './db/repos/nodes'
 import { getMediaById } from './db/repos/media'
 import { analyzeFile } from './utils/forensics'
 
@@ -122,21 +122,38 @@ app.whenReady().then(() => {
     }
   })
 
-  // IPC handler for node creation (Doc E: Smart Append)
+  // IPC handler for node creation (Doc E: Smart Append, Doc H: Smart Drop Zones)
   ipcMain.handle(
     'node:create',
-    (_event, { canvasId, mediaId }: { canvasId: string; mediaId: string }) => {
+    (
+      _event,
+      {
+        canvasId,
+        mediaId,
+        targetNodeId,
+        anchorType
+      }: {
+        canvasId: string
+        mediaId: string
+        targetNodeId?: string
+        anchorType?: 'append' | 'stack' | 'prepend'
+      }
+    ) => {
       // 1. Fetch media to get duration and fps
       const media = getMediaById(mediaId)
       if (!media) {
         throw new Error(`[Node] Media not found: ${mediaId}`)
       }
 
-      // 2. Find the tail of the spine (last node)
+      // 2. Determine parent node
+      // If targetNodeId provided from drop zone, fetch it from DB
+      // Otherwise, find the tail of the spine (Smart Append behavior)
       const tailNode = getSpineTail(canvasId)
+      const targetNode = targetNodeId ? getNodeById(targetNodeId) : null
+      const parentNode = targetNode || tailNode
 
-      // 3. Determine topology based on whether this is Genesis or Append
-      if (!tailNode) {
+      // 3. Determine topology based on context
+      if (!parentNode) {
         // Case A: Genesis - First node on canvas
         console.log(`[Node] Genesis: Creating ORIGIN node for canvas ${canvasId}`)
 
@@ -154,18 +171,42 @@ app.whenReady().then(() => {
           playback_rate: 1.0
         })
       } else {
-        // Case B: Append - Attach to the tail node
-        console.log(`[Node] Append: Attaching to tail node ${tailNode.id}`)
+        // Case B: Create node with specified anchor type
+        // Map drop zone types to DB anchor types
+        let dbAnchorType: 'APPEND' | 'TOP' | 'PREPEND' = 'APPEND'
+        let nodeType: 'SPINE' | 'SATELLITE' = 'SPINE'
+        let trackLane = parentNode.ui_track_lane ?? 0 // Inherit parent's track by default
+
+        if (anchorType === 'stack') {
+          // Stack creates a SATELLITE above the parent (Doc G: V(n+1))
+          // Track lane increments: parent on V1 (lane 0) -> child on V2 (lane 1)
+          dbAnchorType = 'TOP'
+          nodeType = 'SATELLITE'
+          trackLane = (parentNode.ui_track_lane ?? 0) + 1
+          console.log(
+            `[Node] Stack: Creating SATELLITE on V${trackLane + 1} above node ${parentNode.id} (V${(parentNode.ui_track_lane ?? 0) + 1})`
+          )
+        } else if (anchorType === 'prepend') {
+          dbAnchorType = 'PREPEND'
+          // Prepend stays on the same track as target
+          trackLane = parentNode.ui_track_lane ?? 0
+          console.log(`[Node] Prepend: Before node ${parentNode.id} on V${trackLane + 1}`)
+        } else {
+          // Append stays on the same track as target
+          dbAnchorType = 'APPEND'
+          trackLane = parentNode.ui_track_lane ?? 0
+          console.log(`[Node] Append: After node ${parentNode.id} on V${trackLane + 1}`)
+        }
 
         return createNode({
           canvas_id: canvasId,
-          type: 'SPINE',
+          type: nodeType,
           asset_id: mediaId,
-          parent_id: tailNode.id,
-          anchor_type: 'APPEND',
+          parent_id: parentNode.id,
+          anchor_type: dbAnchorType,
           container_id: null,
           drift: 0,
-          ui_track_lane: 0,
+          ui_track_lane: trackLane,
           media_in_point: 0,
           media_out_point: media.duration_sec,
           playback_rate: 1.0

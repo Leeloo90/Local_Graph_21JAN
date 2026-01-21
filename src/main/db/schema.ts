@@ -47,7 +47,7 @@ export const SCHEMA_V5 = [
     FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
   );`,
 
-  // 5. NODES (The Topology - Includes Doc E Retiming)
+  // 5. NODES (The Topology - Includes Doc E Retiming & Doc G Track Logic)
   `CREATE TABLE IF NOT EXISTS nodes (
     id TEXT PRIMARY KEY,
     canvas_id TEXT NOT NULL,
@@ -57,6 +57,7 @@ export const SCHEMA_V5 = [
     anchor_type TEXT,
     container_id TEXT,
     drift INTEGER DEFAULT 0,
+    ui_track_lane INTEGER DEFAULT 0,
     media_in_point REAL DEFAULT 0,
     media_out_point REAL,
     playback_rate REAL DEFAULT 1.0,

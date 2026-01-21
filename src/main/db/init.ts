@@ -33,9 +33,22 @@ export function initializeDatabase(): Database.Database {
         db!.prepare(statement).run();
       }
     });
-    
+
     runTransaction();
     console.log('[DB] Schema applied successfully (v5.0).');
+
+    // Migration: Add ui_track_lane column if it doesn't exist (v5.1)
+    try {
+      const tableInfo = db.prepare("PRAGMA table_info(nodes)").all() as { name: string }[];
+      const hasUiTrackLane = tableInfo.some(col => col.name === 'ui_track_lane');
+
+      if (!hasUiTrackLane) {
+        db.prepare("ALTER TABLE nodes ADD COLUMN ui_track_lane INTEGER DEFAULT 0").run();
+        console.log('[DB] Migration: Added ui_track_lane column to nodes table.');
+      }
+    } catch (migrationError) {
+      console.warn('[DB] Migration check failed:', migrationError);
+    }
     
     return db;
   } catch (error) {

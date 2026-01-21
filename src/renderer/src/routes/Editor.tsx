@@ -1,5 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef, useCallback, useMemo } from 'react'
 import type { GraphState, StoryNode, Canvas, Media } from '@shared/index.d'
+import {
+  computeGraphLayout,
+  detectDropZone,
+  type DropZone,
+  NODE_HEIGHT
+} from '../utils/layout'
 
 interface EditorProps {
   projectId: string
@@ -269,92 +275,217 @@ interface GraphPanelProps {
   onNodeCreated: () => void
 }
 
+// Viewport state for pan/zoom camera
+interface Viewport {
+  x: number
+  y: number
+  scale: number
+}
+
 function GraphPanel({
   canvasId,
   nodes,
   canvas,
   onNodeCreated
 }: GraphPanelProps): React.JSX.Element {
-  const [isDragOver, setIsDragOver] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [dropZone, setDropZone] = useState<DropZone | null>(null)
+  const [isDragging, setIsDragging] = useState(false)
+
+  // Viewport camera state (Doc H: Pan & Zoom)
+  const [viewport, setViewport] = useState<Viewport>({ x: 0, y: 0, scale: 1 })
+  const [isPanning, setIsPanning] = useState(false)
+  const [panStart, setPanStart] = useState({ x: 0, y: 0 })
+  const [spacePressed, setSpacePressed] = useState(false)
+
+  // Compute layout using the physics engine (Doc E)
+  const layout = useMemo(() => computeGraphLayout(nodes), [nodes])
   const hasNodes = nodes.length > 0
 
-  // Calculate timeline positions for nodes (Doc F: Two Timecodes)
-  const calculateNodePositions = (): { node: StoryNode; x: number; width: number }[] => {
-    const PIXELS_PER_SECOND = 10
-    const positions: { node: StoryNode; x: number; width: number }[] = []
+  // Calculate vertical center offset to position V1 (track 0) in the middle
+  const getVerticalOffset = useCallback(() => {
+    if (!containerRef.current) return 200
+    const containerHeight = containerRef.current.clientHeight
+    // Center the V1 track (y=0) vertically
+    return containerHeight / 2 - NODE_HEIGHT / 2
+  }, [])
 
-    // Find the ORIGIN node first
-    const originNode = nodes.find((n) => n.anchor_type === 'ORIGIN')
-    if (!originNode) return positions
+  // Convert screen coordinates to canvas coordinates (accounting for viewport transform)
+  const screenToCanvas = useCallback(
+    (screenX: number, screenY: number) => {
+      const rect = containerRef.current?.getBoundingClientRect()
+      if (!rect) return { x: screenX, y: screenY }
 
-    // Build a map of parent -> children for traversal
-    const childrenMap = new Map<string, StoryNode[]>()
-    nodes.forEach((node) => {
-      if (node.parent_id) {
-        const children = childrenMap.get(node.parent_id) || []
-        children.push(node)
-        childrenMap.set(node.parent_id, children)
+      const relX = screenX - rect.left
+      const relY = screenY - rect.top
+
+      // Reverse the viewport transform: (screen - pan) / scale
+      const canvasX = (relX - viewport.x) / viewport.scale
+      const canvasY = (relY - viewport.y - getVerticalOffset()) / viewport.scale
+
+      return { x: canvasX, y: canvasY }
+    },
+    [viewport, getVerticalOffset]
+  )
+
+  // Handle keyboard events for Space key (pan mode)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'Space' && !spacePressed) {
+        setSpacePressed(true)
+        e.preventDefault()
       }
-    })
-
-    // Calculate positions recursively
-    const processNode = (node: StoryNode, startX: number): void => {
-      const duration = (node.media_out_point ?? 0) - node.media_in_point
-      const width = Math.max(duration * PIXELS_PER_SECOND, 60) // Min 60px width
-
-      positions.push({ node, x: startX, width })
-
-      // Process APPEND children
-      const children = childrenMap.get(node.id) || []
-      let nextX = startX + width
-      children.forEach((child) => {
-        if (child.anchor_type === 'APPEND') {
-          nextX += child.drift * PIXELS_PER_SECOND / 1000 // drift is in ms
-          processNode(child, nextX)
-          const childDuration = (child.media_out_point ?? 0) - child.media_in_point
-          nextX += Math.max(childDuration * PIXELS_PER_SECOND, 60)
-        }
-      })
+    }
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space') {
+        setSpacePressed(false)
+        setIsPanning(false)
+      }
     }
 
-    processNode(originNode, 50) // Start 50px from left edge
-    return positions
-  }
-
-  const handleDragOver = (e: React.DragEvent): void => {
-    e.preventDefault()
-    e.dataTransfer.dropEffect = 'copy'
-    setIsDragOver(true)
-  }
-
-  const handleDragLeave = (): void => {
-    setIsDragOver(false)
-  }
-
-  const handleDrop = async (e: React.DragEvent): Promise<void> => {
-    e.preventDefault()
-    setIsDragOver(false)
-
-    const mediaId = e.dataTransfer.getData('mediaId')
-    if (!mediaId) return
-
-    try {
-      console.log(`[GraphPanel] Creating node for media: ${mediaId}`)
-      await window.api.createNode(canvasId, mediaId)
-      onNodeCreated()
-    } catch (error) {
-      console.error('[GraphPanel] Failed to create node:', error)
+    window.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('keyup', handleKeyUp)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('keyup', handleKeyUp)
     }
-  }
+  }, [spacePressed])
 
-  const nodePositions = calculateNodePositions()
+  // Pan handlers (Doc H: Middle Mouse OR Space + Left Click)
+  const handleMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      // Middle mouse button (1) or Space + Left click
+      if (e.button === 1 || (e.button === 0 && spacePressed)) {
+        e.preventDefault()
+        setIsPanning(true)
+        setPanStart({ x: e.clientX - viewport.x, y: e.clientY - viewport.y })
+      }
+    },
+    [spacePressed, viewport.x, viewport.y]
+  )
+
+  const handleMouseMove = useCallback(
+    (e: React.MouseEvent) => {
+      if (isPanning) {
+        setViewport((prev) => ({
+          ...prev,
+          x: e.clientX - panStart.x,
+          y: e.clientY - panStart.y
+        }))
+      }
+    },
+    [isPanning, panStart]
+  )
+
+  const handleMouseUp = useCallback(() => {
+    setIsPanning(false)
+  }, [])
+
+  // Zoom handler (Doc H: Mouse Wheel OR Trackpad Pinch)
+  const handleWheel = useCallback(
+    (e: React.WheelEvent) => {
+      e.preventDefault()
+
+      const rect = containerRef.current?.getBoundingClientRect()
+      if (!rect) return
+
+      // Zoom toward cursor position
+      const mouseX = e.clientX - rect.left
+      const mouseY = e.clientY - rect.top
+
+      // Determine if this is a zoom or pan gesture
+      // Trackpad pinch events have ctrlKey set, regular wheel is zoom
+      // Shift + Wheel = horizontal pan (Doc H)
+      if (e.shiftKey) {
+        // Horizontal scroll/pan
+        setViewport((prev) => ({
+          ...prev,
+          x: prev.x - e.deltaY
+        }))
+        return
+      }
+
+      // Regular wheel or Ctrl/Cmd+wheel = Zoom
+      const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1
+      const newScale = Math.min(Math.max(viewport.scale * zoomFactor, 0.1), 3.0)
+
+      // Adjust pan to zoom toward cursor
+      const scaleRatio = newScale / viewport.scale
+      const newX = mouseX - (mouseX - viewport.x) * scaleRatio
+      const newY = mouseY - (mouseY - viewport.y) * scaleRatio
+
+      setViewport({ x: newX, y: newY, scale: newScale })
+    },
+    [viewport]
+  )
+
+  // Drag & Drop handlers
+  const handleDragOver = useCallback(
+    (e: React.DragEvent): void => {
+      e.preventDefault()
+      e.dataTransfer.dropEffect = 'copy'
+      setIsDragging(true)
+
+      // Get mouse position in canvas coordinates (accounting for viewport transform)
+      const canvasPos = screenToCanvas(e.clientX, e.clientY)
+      const zone = detectDropZone(canvasPos.x, canvasPos.y, layout, 5)
+      setDropZone(zone)
+    },
+    [layout, screenToCanvas]
+  )
+
+  const handleDragLeave = useCallback((): void => {
+    setIsDragging(false)
+    setDropZone(null)
+  }, [])
+
+  const handleDrop = useCallback(
+    async (e: React.DragEvent): Promise<void> => {
+      e.preventDefault()
+      setIsDragging(false)
+
+      const mediaId = e.dataTransfer.getData('mediaId')
+      console.log('[GraphPanel] Drop Event. Media:', mediaId, 'Zone:', dropZone)
+
+      if (!mediaId) {
+        console.warn('[GraphPanel] No Media ID found in dataTransfer')
+        setDropZone(null)
+        return
+      }
+
+      try {
+        const targetNodeId = dropZone?.targetNodeId || undefined
+        const anchorType = dropZone?.type || undefined
+        console.log(
+          `[GraphPanel] Creating node for Canvas: ${canvasId}, Media: ${mediaId}, Target: ${targetNodeId}, Anchor: ${anchorType}`
+        )
+        const newNode = await window.api.createNode(canvasId, mediaId, targetNodeId, anchorType)
+        console.log('[GraphPanel] Node Created Successfully:', newNode)
+        onNodeCreated()
+      } catch (error) {
+        console.error('[GraphPanel] CRITICAL ERROR during node creation:', error)
+      }
+
+      setDropZone(null)
+    },
+    [canvasId, dropZone, onNodeCreated]
+  )
+
+  const verticalOffset = getVerticalOffset()
 
   return (
     <div
+      ref={containerRef}
       style={{
         ...graphStyles.container,
-        ...(isDragOver ? graphStyles.containerDragOver : {})
+        ...(isDragging ? graphStyles.containerDragOver : {}),
+        cursor: spacePressed ? 'grab' : isPanning ? 'grabbing' : 'default'
       }}
+      onMouseDown={handleMouseDown}
+      onMouseMove={handleMouseMove}
+      onMouseUp={handleMouseUp}
+      onMouseLeave={handleMouseUp}
+      onWheel={handleWheel}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
@@ -362,15 +493,8 @@ function GraphPanel({
       {/* Grid background pattern */}
       <div style={graphStyles.gridOverlay} />
 
-      {/* Drop zone indicator */}
-      {isDragOver && (
-        <div style={graphStyles.dropIndicator}>
-          <span>Drop to create node</span>
-        </div>
-      )}
-
       {/* Placeholder content when empty */}
-      {!hasNodes && !isDragOver && (
+      {!hasNodes && !isDragging && (
         <div style={graphStyles.placeholder}>
           <div style={graphStyles.icon}>
             <svg
@@ -396,53 +520,226 @@ function GraphPanel({
           <p style={graphStyles.subtitle}>Fractal Topology & Physics (Doc E)</p>
           <p style={graphStyles.canvasId}>Canvas: {canvasId.slice(0, 8)}...</p>
           <p style={graphStyles.emptyHint}>Drop media from the library to create your first node</p>
+          <p style={graphStyles.emptyHint}>Space+Drag to pan, Ctrl+Wheel to zoom</p>
           <div style={graphStyles.badge}>Y-AXIS: Structure & Hierarchy</div>
         </div>
       )}
 
-      {/* Render nodes on the canvas */}
-      {hasNodes && (
-        <div style={graphStyles.nodeLayer}>
-          {nodePositions.map(({ node, x, width }) => (
-            <div
-              key={node.id}
-              style={{
-                ...graphStyles.nodeBlock,
-                left: `${x}px`,
-                width: `${width}px`,
-                ...(node.anchor_type === 'ORIGIN' ? graphStyles.nodeOrigin : {})
-              }}
-            >
-              <div style={graphStyles.nodeLabel}>
-                {node.anchor_type === 'ORIGIN' ? 'ORIGIN' : 'SPINE'}
-              </div>
-              <div style={graphStyles.nodeDuration}>
-                {((node.media_out_point ?? 0) - node.media_in_point).toFixed(1)}s
-              </div>
-            </div>
-          ))}
+      {/* Viewport Transform Container (Pan/Zoom) */}
+      <div
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          transformOrigin: 'top left',
+          transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`,
+          willChange: 'transform'
+        }}
+      >
+        {/* SVG Layer for Connection Lines */}
+        <svg
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            width: `${layout.totalWidth + 500}px`,
+            height: `${layout.totalHeight + 500}px`,
+            pointerEvents: 'none',
+            overflow: 'visible'
+          }}
+        >
+          {layout.connections.map((conn) => {
+            const y1 = conn.fromY + verticalOffset
+            const y2 = conn.toY + verticalOffset
+            const midX = (conn.fromX + conn.toX) / 2
 
-          {/* Connection lines between nodes */}
-          {nodePositions.slice(1).map(({ node, x }, index) => {
-            const prevPos = nodePositions[index]
-            const lineStart = prevPos.x + prevPos.width
-            const lineWidth = x - lineStart
-            if (lineWidth <= 0) return null
             return (
-              <div
-                key={`line-${node.id}`}
-                style={{
-                  ...graphStyles.connectionLine,
-                  left: `${lineStart}px`,
-                  width: `${lineWidth}px`
-                }}
-              />
+              <g key={conn.id}>
+                {conn.type === 'append' ? (
+                  <path
+                    d={`M ${conn.fromX} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${conn.toX} ${y2}`}
+                    fill="none"
+                    stroke="#4a4a4a"
+                    strokeWidth="2"
+                  />
+                ) : conn.type === 'stack' ? (
+                  <path
+                    d={`M ${conn.fromX} ${y1} L ${conn.fromX} ${(y1 + y2) / 2} L ${conn.toX} ${(y1 + y2) / 2} L ${conn.toX} ${y2}`}
+                    fill="none"
+                    stroke="#06B6D4"
+                    strokeWidth="2"
+                    strokeDasharray="4 2"
+                  />
+                ) : (
+                  <line x1={conn.fromX} y1={y1} x2={conn.toX} y2={y2} stroke="#4a4a4a" strokeWidth="2" />
+                )}
+                <circle cx={conn.toX} cy={y2} r="4" fill={conn.type === 'stack' ? '#06B6D4' : '#4a4a4a'} />
+              </g>
             )
           })}
-        </div>
-      )}
+        </svg>
 
-      {/* Node count indicator when nodes exist */}
+        {/* HTML Layer for Data Block Nodes */}
+        <div style={{ position: 'absolute', top: 0, left: 0 }}>
+          {layout.nodes.map((renderNode) => {
+            const isSatellite = renderNode.node.type === 'SATELLITE'
+            const headerColor = isSatellite ? '#06B6D4' : '#A855F7'
+
+            return (
+              <div
+                key={renderNode.node.id}
+                style={{
+                  position: 'absolute',
+                  left: `${renderNode.x}px`,
+                  top: `${renderNode.y + verticalOffset}px`,
+                  width: `${renderNode.width}px`,
+                  height: `${renderNode.height}px`,
+                  backgroundColor: '#1e1e1e',
+                  borderRadius: '6px',
+                  border: renderNode.isOrigin
+                    ? '2px solid #F59E0B'
+                    : '1px solid #3c3c3c',
+                  boxShadow: renderNode.isOrigin
+                    ? '0 0 16px rgba(245, 158, 11, 0.5)'
+                    : '0 2px 8px rgba(0, 0, 0, 0.3)',
+                  overflow: 'hidden',
+                  cursor: 'pointer',
+                  pointerEvents: 'auto'
+                }}
+              >
+                {/* Header Strip (6px colored bar at top) */}
+                <div
+                  style={{
+                    height: '6px',
+                    backgroundColor: headerColor,
+                    borderTopLeftRadius: '5px',
+                    borderTopRightRadius: '5px'
+                  }}
+                />
+
+                {/* Body Content */}
+                <div
+                  style={{
+                    padding: '6px 8px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    justifyContent: 'center',
+                    height: `${renderNode.height - 6}px`,
+                    boxSizing: 'border-box'
+                  }}
+                >
+                  {/* Node label (truncated) */}
+                  <div
+                    style={{
+                      fontSize: '11px',
+                      fontWeight: 600,
+                      color: '#ffffff',
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis'
+                    }}
+                  >
+                    {renderNode.isOrigin ? 'ORIGIN' : renderNode.node.type}
+                  </div>
+
+                  {/* Duration */}
+                  <div
+                    style={{
+                      fontSize: '10px',
+                      color: '#808080',
+                      marginTop: '2px'
+                    }}
+                  >
+                    {((renderNode.node.media_out_point ?? 0) - renderNode.node.media_in_point).toFixed(1)}s
+                  </div>
+                </div>
+
+                {/* Track Badge (bottom-right pill) */}
+                <div
+                  style={{
+                    position: 'absolute',
+                    bottom: '4px',
+                    right: '4px',
+                    padding: '2px 6px',
+                    backgroundColor: headerColor,
+                    borderRadius: '8px',
+                    fontSize: '9px',
+                    fontWeight: 700,
+                    color: '#ffffff'
+                  }}
+                >
+                  {renderNode.trackLabel}
+                </div>
+
+                {/* Left Anchor Point */}
+                <div
+                  style={{
+                    position: 'absolute',
+                    left: '-5px',
+                    top: '50%',
+                    transform: 'translateY(-50%)',
+                    width: '10px',
+                    height: '10px',
+                    backgroundColor: '#4a4a4a',
+                    borderRadius: '50%',
+                    border: '2px solid #2d2d2d'
+                  }}
+                />
+
+                {/* Right Anchor Point */}
+                <div
+                  style={{
+                    position: 'absolute',
+                    right: '-5px',
+                    top: '50%',
+                    transform: 'translateY(-50%)',
+                    width: '10px',
+                    height: '10px',
+                    backgroundColor: '#4a4a4a',
+                    borderRadius: '50%',
+                    border: '2px solid #2d2d2d'
+                  }}
+                />
+              </div>
+            )
+          })}
+
+          {/* Ghost Node Preview during drag */}
+          {isDragging && dropZone && (
+            <div
+              style={{
+                position: 'absolute',
+                left: `${dropZone.ghostX}px`,
+                top: `${dropZone.ghostY + verticalOffset}px`,
+                width: `${dropZone.ghostWidth}px`,
+                height: `${NODE_HEIGHT}px`,
+                backgroundColor:
+                  dropZone.type === 'stack' ? 'rgba(6, 182, 212, 0.2)' : 'rgba(168, 85, 247, 0.2)',
+                border: `2px dashed ${dropZone.type === 'stack' ? '#06B6D4' : '#A855F7'}`,
+                borderRadius: '6px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                pointerEvents: 'none'
+              }}
+            >
+              <span
+                style={{
+                  fontSize: '11px',
+                  fontWeight: 600,
+                  color: dropZone.type === 'stack' ? '#06B6D4' : '#A855F7',
+                  textTransform: 'uppercase'
+                }}
+              >
+                {dropZone.type === 'stack' ? 'Stack Above' : dropZone.type === 'prepend' ? 'Prepend' : 'Append'}
+              </span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* HUD Overlay (fixed position, not affected by viewport) */}
+      {/* Node count indicator */}
       {hasNodes && (
         <div style={graphStyles.nodeCount}>
           <span>
@@ -452,7 +749,39 @@ function GraphPanel({
         </div>
       )}
 
-      {/* Coordinate indicators */}
+      {/* Zoom controls */}
+      <div style={graphStyles.zoomControls}>
+        <button
+          style={graphStyles.zoomButton}
+          onClick={() => setViewport(prev => ({
+            ...prev,
+            scale: Math.min(prev.scale * 1.2, 3.0)
+          }))}
+          title="Zoom In"
+        >
+          +
+        </button>
+        <span style={graphStyles.zoomIndicatorText}>{Math.round(viewport.scale * 100)}%</span>
+        <button
+          style={graphStyles.zoomButton}
+          onClick={() => setViewport(prev => ({
+            ...prev,
+            scale: Math.max(prev.scale * 0.8, 0.1)
+          }))}
+          title="Zoom Out"
+        >
+          -
+        </button>
+        <button
+          style={graphStyles.zoomResetButton}
+          onClick={() => setViewport({ x: 0, y: 0, scale: 1 })}
+          title="Reset View (100%)"
+        >
+          Reset
+        </button>
+      </div>
+
+      {/* Floor indicator */}
       <div style={graphStyles.floorIndicator}>
         <span>Y = 0 (The Floor)</span>
       </div>
@@ -871,6 +1200,61 @@ const graphStyles: Record<string, React.CSSProperties> = {
     fontSize: '10px',
     color: '#0e639c'
   },
+  zoomControls: {
+    position: 'absolute',
+    bottom: '12px',
+    right: '12px',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
+    padding: '4px',
+    backgroundColor: 'rgba(30, 30, 30, 0.95)',
+    borderRadius: '6px',
+    border: '1px solid #3c3c3c'
+  },
+  zoomButton: {
+    width: '28px',
+    height: '28px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#252526',
+    border: '1px solid #3c3c3c',
+    borderRadius: '4px',
+    color: '#cccccc',
+    fontSize: '16px',
+    fontWeight: 600,
+    cursor: 'pointer',
+    transition: 'background-color 0.15s ease'
+  },
+  zoomResetButton: {
+    padding: '4px 8px',
+    backgroundColor: '#252526',
+    border: '1px solid #3c3c3c',
+    borderRadius: '4px',
+    color: '#808080',
+    fontSize: '10px',
+    cursor: 'pointer',
+    transition: 'background-color 0.15s ease'
+  },
+  zoomIndicatorText: {
+    minWidth: '40px',
+    textAlign: 'center' as const,
+    fontSize: '11px',
+    color: '#808080',
+    fontFamily: 'monospace'
+  },
+  zoomIndicator: {
+    position: 'absolute',
+    bottom: '12px',
+    right: '12px',
+    padding: '4px 8px',
+    backgroundColor: 'rgba(30, 30, 30, 0.9)',
+    borderRadius: '4px',
+    fontSize: '10px',
+    color: '#808080',
+    fontFamily: 'monospace'
+  },
   dropIndicator: {
     position: 'absolute',
     top: '50%',
@@ -932,6 +1316,37 @@ const graphStyles: Record<string, React.CSSProperties> = {
     height: '2px',
     backgroundColor: '#4a4a4a',
     transform: 'translateY(-50%)'
+  },
+  svgLayer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    width: '100%',
+    height: '100%',
+    pointerEvents: 'none',
+    zIndex: 5
+  },
+  trackBadge: {
+    position: 'absolute',
+    top: '4px',
+    left: '4px',
+    padding: '2px 4px',
+    backgroundColor: 'rgba(0, 0, 0, 0.4)',
+    borderRadius: '2px',
+    fontSize: '8px',
+    fontWeight: 600,
+    color: 'rgba(255, 255, 255, 0.7)',
+    letterSpacing: '0.5px'
+  },
+  anchorPoint: {
+    position: 'absolute',
+    top: '50%',
+    transform: 'translateY(-50%)',
+    width: '8px',
+    height: '8px',
+    backgroundColor: '#4a4a4a',
+    borderRadius: '50%',
+    border: '1px solid #2d2d2d'
   }
 }
 

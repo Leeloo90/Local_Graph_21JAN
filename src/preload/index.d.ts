@@ -83,8 +83,13 @@ export interface Api {
   // Graph APIs (Doc A 3.4)
   getGraphState: (canvasId: string) => Promise<GraphState>
 
-  // Node APIs (Doc E: Topology)
-  createNode: (canvasId: string, mediaId: string) => Promise<StoryNode>
+  // Node APIs (Doc E: Topology, Doc H: Smart Drop Zones)
+  createNode: (
+    canvasId: string,
+    mediaId: string,
+    targetNodeId?: string,
+    anchorType?: 'append' | 'stack' | 'prepend'
+  ) => Promise<StoryNode>
 }
 
 declare global {

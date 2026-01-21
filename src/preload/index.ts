@@ -28,9 +28,14 @@ const api = {
   // Graph APIs (Doc A 3.4)
   getGraphState: (canvasId: string): Promise<unknown> => ipcRenderer.invoke('graph:get-state', canvasId),
 
-  // Node APIs (Doc E: Topology)
-  createNode: (canvasId: string, mediaId: string): Promise<unknown> =>
-    ipcRenderer.invoke('node:create', { canvasId, mediaId })
+  // Node APIs (Doc E: Topology, Doc H: Smart Drop Zones)
+  createNode: (
+    canvasId: string,
+    mediaId: string,
+    targetNodeId?: string,
+    anchorType?: 'append' | 'stack' | 'prepend'
+  ): Promise<unknown> =>
+    ipcRenderer.invoke('node:create', { canvasId, mediaId, targetNodeId, anchorType })
 }
 
 // Use `contextBridge` APIs to expose Electron APIs to
