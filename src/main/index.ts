@@ -6,7 +6,7 @@ import { initializeDatabase } from './db/init'
 import { createProject, getAllProjects } from './db/repos/projects'
 import { addMediaToProject, getProjectMedia, type Media } from './db/repos/media'
 import { createCanvas, getProjectCanvases, getCanvasById } from './db/repos/canvases'
-import { getNodesByCanvasId, createNode, getSpineTail, getNodeById } from './db/repos/nodes'
+import { getNodesByCanvasId, createNode, getSpineTail, getNodeById, updateNode, type UpdateNodePayload } from './db/repos/nodes'
 import { getMediaById } from './db/repos/media'
 import { analyzeFile } from './utils/forensics'
 
@@ -229,6 +229,24 @@ app.whenReady().then(() => {
           playback_rate: 1.0
         })
       }
+    }
+  )
+
+  // IPC handler for node update (Doc I: Inspector-driven property changes)
+  ipcMain.handle(
+    'node:update',
+    (
+      _event,
+      {
+        nodeId,
+        updates
+      }: {
+        nodeId: string
+        updates: UpdateNodePayload
+      }
+    ) => {
+      console.log(`[Node] Updating node ${nodeId}:`, updates)
+      return updateNode(nodeId, updates)
     }
   )
 

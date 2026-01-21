@@ -90,6 +90,17 @@ export interface Api {
     targetNodeId?: string,
     anchorType?: 'append' | 'stack' | 'prepend'
   ) => Promise<StoryNode>
+
+  // Node Update API (Doc I: Inspector-driven updates)
+  updateNode: (
+    nodeId: string,
+    updates: {
+      drift?: number
+      media_in_point?: number
+      media_out_point?: number | null
+      playback_rate?: number
+    }
+  ) => Promise<StoryNode>
 }
 
 declare global {

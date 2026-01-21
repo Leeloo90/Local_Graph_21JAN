@@ -28,6 +28,8 @@ function Editor({
   const [nodes, setNodes] = useState<StoryNode[]>([])
   const [mediaItems, setMediaItems] = useState<Media[]>([])
   const [importing, setImporting] = useState(false)
+  // Global selection state (Doc H: Bi-Directional Sync)
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
 
   const fetchMedia = async (): Promise<void> => {
     try {
@@ -93,6 +95,36 @@ function Editor({
     }
   }
 
+  // Handle node selection (Doc H: Bi-Directional Sync)
+  const handleSelectNode = useCallback((nodeId: string | null) => {
+    setSelectedNodeId(nodeId)
+    console.log(`[Editor] Selected node: ${nodeId}`)
+  }, [])
+
+  // Handle node updates from Inspector (Doc I)
+  const handleUpdateNode = useCallback(
+    async (nodeId: string, updates: { drift?: number; media_in_point?: number; media_out_point?: number | null; playback_rate?: number }) => {
+      try {
+        console.log(`[Editor] Updating node ${nodeId}:`, updates)
+        await window.api.updateNode(nodeId, updates)
+        await refreshGraph()
+      } catch (error) {
+        console.error('[Editor] Failed to update node:', error)
+      }
+    },
+    [canvasId]
+  )
+
+  // Get selected node and its media
+  const selectedNode = useMemo(
+    () => nodes.find((n) => n.id === selectedNodeId) ?? null,
+    [nodes, selectedNodeId]
+  )
+  const selectedMedia = useMemo(
+    () => (selectedNode?.asset_id ? mediaItems.find((m) => m.id === selectedNode.asset_id) ?? null : null),
+    [selectedNode, mediaItems]
+  )
+
   if (loading) {
     return (
       <div style={styles.loadingContainer}>
@@ -146,18 +178,29 @@ function Editor({
               nodes={nodes}
               canvas={canvas}
               onNodeCreated={refreshGraph}
+              selectedNodeId={selectedNodeId}
+              onSelectNode={handleSelectNode}
             />
           </main>
 
           {/* ZONE C: The Timeline (Temporal Floor - X-Axis) */}
           <div style={styles.timelinePanel}>
-            <TimelinePanel nodes={nodes} fps={canvas?.fps ?? 24} />
+            <TimelinePanel
+              nodes={nodes}
+              fps={canvas?.fps ?? 24}
+              selectedNodeId={selectedNodeId}
+              onSelectNode={handleSelectNode}
+            />
           </div>
         </div>
 
         {/* ZONE D: Right Sidebar (Inspector) */}
         <aside style={styles.rightSidebar}>
-          <InspectorPanel />
+          <InspectorPanel
+            node={selectedNode}
+            media={selectedMedia}
+            onUpdate={handleUpdateNode}
+          />
         </aside>
       </div>
     </div>
@@ -274,6 +317,8 @@ interface GraphPanelProps {
   nodes: StoryNode[]
   canvas: Canvas | null
   onNodeCreated: () => void
+  selectedNodeId: string | null
+  onSelectNode: (nodeId: string | null) => void
 }
 
 // Viewport state for pan/zoom camera
@@ -287,7 +332,9 @@ function GraphPanel({
   canvasId,
   nodes,
   canvas,
-  onNodeCreated
+  onNodeCreated,
+  selectedNodeId,
+  onSelectNode
 }: GraphPanelProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const [dropZone, setDropZone] = useState<DropZone | null>(null)
@@ -482,6 +529,7 @@ function GraphPanel({
         ...(isDragging ? graphStyles.containerDragOver : {}),
         cursor: spacePressed ? 'grab' : isPanning ? 'grabbing' : 'default'
       }}
+      onClick={() => onSelectNode(null)} // Deselect when clicking empty space
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
@@ -585,10 +633,28 @@ function GraphPanel({
           {layout.nodes.map((renderNode) => {
             const isSatellite = renderNode.node.type === 'SATELLITE'
             const headerColor = isSatellite ? '#06B6D4' : '#A855F7'
+            const isSelected = renderNode.node.id === selectedNodeId
+
+            // Selection styling (Doc H: Yellow border for selection)
+            const getBorderStyle = (): string => {
+              if (isSelected) return '2px solid #FACC15' // Yellow for selection
+              if (renderNode.isOrigin) return '2px solid #F59E0B' // Orange for origin
+              return '1px solid #3c3c3c'
+            }
+
+            const getBoxShadow = (): string => {
+              if (isSelected) return '0 0 16px rgba(250, 204, 21, 0.5)' // Yellow glow
+              if (renderNode.isOrigin) return '0 0 16px rgba(245, 158, 11, 0.5)'
+              return '0 2px 8px rgba(0, 0, 0, 0.3)'
+            }
 
             return (
               <div
                 key={renderNode.node.id}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onSelectNode(renderNode.node.id)
+                }}
                 style={{
                   position: 'absolute',
                   left: `${renderNode.x}px`,
@@ -597,15 +663,12 @@ function GraphPanel({
                   height: `${renderNode.height}px`,
                   backgroundColor: '#1e1e1e',
                   borderRadius: '6px',
-                  border: renderNode.isOrigin
-                    ? '2px solid #F59E0B'
-                    : '1px solid #3c3c3c',
-                  boxShadow: renderNode.isOrigin
-                    ? '0 0 16px rgba(245, 158, 11, 0.5)'
-                    : '0 2px 8px rgba(0, 0, 0, 0.3)',
+                  border: getBorderStyle(),
+                  boxShadow: getBoxShadow(),
                   overflow: 'hidden',
                   cursor: 'pointer',
-                  pointerEvents: 'auto'
+                  pointerEvents: 'auto',
+                  transition: 'border 0.15s ease, box-shadow 0.15s ease'
                 }}
               >
                 {/* Header Strip (6px colored bar at top) */}
@@ -793,9 +856,11 @@ function GraphPanel({
 interface TimelinePanelProps {
   nodes: StoryNode[]
   fps: number
+  selectedNodeId: string | null
+  onSelectNode: (nodeId: string | null) => void
 }
 
-function TimelinePanel({ nodes, fps }: TimelinePanelProps): React.JSX.Element {
+function TimelinePanel({ nodes, fps, selectedNodeId, onSelectNode }: TimelinePanelProps): React.JSX.Element {
   const trackAreaRef = useRef<HTMLDivElement>(null)
   const [timeScale, setTimeScale] = useState(50) // Pixels per second
   const [currentTime, setCurrentTime] = useState(0) // Playhead position in seconds
@@ -950,40 +1015,53 @@ function TimelinePanel({ nodes, fps }: TimelinePanelProps): React.JSX.Element {
                 }}
               >
                 {/* Render clips in this track */}
-                {row.clips.map((clip) => (
-                  <div
-                    key={clip.id}
-                    style={{
-                      position: 'absolute',
-                      left: `${clip.start * timeScale}px`,
-                      width: `${(clip.end - clip.start) * timeScale}px`,
-                      top: '4px',
-                      bottom: '4px',
-                      backgroundColor: clip.color,
-                      borderRadius: '3px',
-                      border: '1px solid rgba(255, 255, 255, 0.1)',
-                      overflow: 'hidden',
-                      cursor: 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      paddingLeft: '6px'
-                    }}
-                    title={`${clip.name} (${clip.duration.toFixed(2)}s)`}
-                  >
-                    <span
-                      style={{
-                        fontSize: '10px',
-                        fontWeight: 500,
-                        color: 'rgba(255, 255, 255, 0.9)',
-                        whiteSpace: 'nowrap',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis'
+                {row.clips.map((clip) => {
+                  const isSelected = clip.nodeId === selectedNodeId
+                  return (
+                    <div
+                      key={clip.id}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onSelectNode(clip.nodeId)
                       }}
+                      style={{
+                        position: 'absolute',
+                        left: `${clip.start * timeScale}px`,
+                        width: `${(clip.end - clip.start) * timeScale}px`,
+                        top: '4px',
+                        bottom: '4px',
+                        backgroundColor: clip.color,
+                        borderRadius: '3px',
+                        border: isSelected
+                          ? '2px solid #FACC15'
+                          : '1px solid rgba(255, 255, 255, 0.1)',
+                        boxShadow: isSelected
+                          ? '0 0 8px rgba(250, 204, 21, 0.5)'
+                          : 'none',
+                        overflow: 'hidden',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        paddingLeft: '6px',
+                        transition: 'border 0.15s ease, box-shadow 0.15s ease'
+                      }}
+                      title={`${clip.name} (${clip.duration.toFixed(2)}s)`}
                     >
-                      {clip.name}
-                    </span>
-                  </div>
-                ))}
+                      <span
+                        style={{
+                          fontSize: '10px',
+                          fontWeight: 500,
+                          color: 'rgba(255, 255, 255, 0.9)',
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis'
+                        }}
+                      >
+                        {clip.name}
+                      </span>
+                    </div>
+                  )
+                })}
               </div>
             ))}
 
@@ -1017,24 +1095,261 @@ function TimelinePanel({ nodes, fps }: TimelinePanelProps): React.JSX.Element {
   )
 }
 
-function InspectorPanel(): React.JSX.Element {
+interface InspectorPanelProps {
+  node: StoryNode | null
+  media: Media | null
+  onUpdate: (nodeId: string, updates: { drift?: number; media_in_point?: number; media_out_point?: number | null; playback_rate?: number }) => void
+}
+
+function InspectorPanel({ node, media, onUpdate }: InspectorPanelProps): React.JSX.Element {
+  // Local state for input fields (Doc I: Inspector-driven updates)
+  const [driftMs, setDriftMs] = useState<string>('')
+  const [inPoint, setInPoint] = useState<string>('')
+  const [outPoint, setOutPoint] = useState<string>('')
+  const [playbackRate, setPlaybackRate] = useState<string>('')
+
+  // Sync local state when node changes
+  useEffect(() => {
+    if (node) {
+      setDriftMs((node.drift * 1000).toString()) // Convert seconds to ms
+      setInPoint(node.media_in_point.toFixed(3))
+      setOutPoint(node.media_out_point?.toFixed(3) ?? '')
+      setPlaybackRate(node.playback_rate.toFixed(2))
+    } else {
+      setDriftMs('')
+      setInPoint('')
+      setOutPoint('')
+      setPlaybackRate('')
+    }
+  }, [node])
+
+  // Calculate duration (read-only)
+  const duration = useMemo(() => {
+    if (!node) return 0
+    const outPt = node.media_out_point ?? 0
+    return Math.max(0, outPt - node.media_in_point)
+  }, [node])
+
+  // Get filename from media path
+  const fileName = useMemo(() => {
+    if (!media) return 'No Asset'
+    return media.file_path.split('/').pop()?.split('\\').pop() || media.file_path
+  }, [media])
+
+  // Handle field updates
+  const handleDriftChange = useCallback((value: string) => {
+    setDriftMs(value)
+  }, [])
+
+  const handleDriftBlur = useCallback(() => {
+    if (!node) return
+    const ms = parseFloat(driftMs)
+    if (!isNaN(ms)) {
+      const seconds = ms / 1000 // Convert ms to seconds
+      if (seconds !== node.drift) {
+        onUpdate(node.id, { drift: seconds })
+      }
+    }
+  }, [node, driftMs, onUpdate])
+
+  const handleInPointChange = useCallback((value: string) => {
+    setInPoint(value)
+  }, [])
+
+  const handleInPointBlur = useCallback(() => {
+    if (!node) return
+    const seconds = parseFloat(inPoint)
+    if (!isNaN(seconds) && seconds >= 0 && seconds !== node.media_in_point) {
+      onUpdate(node.id, { media_in_point: seconds })
+    }
+  }, [node, inPoint, onUpdate])
+
+  const handleOutPointChange = useCallback((value: string) => {
+    setOutPoint(value)
+  }, [])
+
+  const handleOutPointBlur = useCallback(() => {
+    if (!node) return
+    const seconds = parseFloat(outPoint)
+    if (!isNaN(seconds) && seconds >= 0) {
+      const newOut = seconds > node.media_in_point ? seconds : null
+      if (newOut !== node.media_out_point) {
+        onUpdate(node.id, { media_out_point: newOut })
+      }
+    }
+  }, [node, outPoint, onUpdate])
+
+  const handlePlaybackRateChange = useCallback((value: string) => {
+    setPlaybackRate(value)
+  }, [])
+
+  const handlePlaybackRateBlur = useCallback(() => {
+    if (!node) return
+    const rate = parseFloat(playbackRate)
+    if (!isNaN(rate) && rate > 0 && rate !== node.playback_rate) {
+      onUpdate(node.id, { playback_rate: rate })
+    }
+  }, [node, playbackRate, onUpdate])
+
+  // No selection - show empty state
+  if (!node) {
+    return (
+      <div style={panelStyles.container}>
+        <div style={panelStyles.header}>
+          <span style={panelStyles.title}>Inspector</span>
+        </div>
+        <div style={panelStyles.content}>
+          <div style={panelStyles.placeholder}>
+            <div style={panelStyles.placeholderIcon}>
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
+                <rect x="3" y="3" width="18" height="14" rx="2" />
+                <line x1="3" y1="9" x2="21" y2="9" />
+                <line x1="8" y1="21" x2="16" y2="21" />
+                <line x1="12" y1="17" x2="12" y2="21" />
+              </svg>
+            </div>
+            <p style={panelStyles.placeholderText}>No Selection</p>
+            <p style={panelStyles.placeholderHint}>Select a node to inspect</p>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  const isSatellite = node.type === 'SATELLITE'
+  const typeColor = isSatellite ? '#06B6D4' : '#A855F7'
+  const trackLabel = `V${(node.ui_track_lane ?? 0) + 1}`
+
   return (
     <div style={panelStyles.container}>
+      {/* Header */}
       <div style={panelStyles.header}>
         <span style={panelStyles.title}>Inspector</span>
+        <span
+          style={{
+            fontSize: '9px',
+            fontWeight: 600,
+            color: typeColor,
+            padding: '2px 6px',
+            backgroundColor: `${typeColor}20`,
+            borderRadius: '3px'
+          }}
+        >
+          {trackLabel}
+        </span>
       </div>
-      <div style={panelStyles.content}>
-        <div style={panelStyles.placeholder}>
-          <div style={panelStyles.placeholderIcon}>
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
-              <rect x="3" y="3" width="18" height="14" rx="2" />
-              <line x1="3" y1="9" x2="21" y2="9" />
-              <line x1="8" y1="21" x2="16" y2="21" />
-              <line x1="12" y1="17" x2="12" y2="21" />
-            </svg>
+
+      {/* Inspector Content */}
+      <div style={inspectorStyles.content}>
+        {/* Node Header Section */}
+        <div style={inspectorStyles.section}>
+          <div style={inspectorStyles.nodeHeader}>
+            <span
+              style={{
+                ...inspectorStyles.typeBadge,
+                backgroundColor: typeColor
+              }}
+            >
+              {node.type}
+            </span>
+            <span style={inspectorStyles.anchorBadge}>{node.anchor_type}</span>
           </div>
-          <p style={panelStyles.placeholderText}>Source Monitor</p>
-          <p style={panelStyles.placeholderHint}>Doc I: Karaoke Transcripts</p>
+          <div style={inspectorStyles.fileName} title={media?.file_path}>
+            {fileName}
+          </div>
+          {media?.duration_sec && (
+            <div style={inspectorStyles.mediaMeta}>
+              Media: {media.duration_sec.toFixed(2)}s
+              {media.fps && ` @ ${media.fps.toFixed(2)} fps`}
+            </div>
+          )}
+        </div>
+
+        {/* Timing Section */}
+        <div style={inspectorStyles.section}>
+          <div style={inspectorStyles.sectionTitle}>Timing</div>
+
+          {/* Drift */}
+          <div style={inspectorStyles.field}>
+            <label style={inspectorStyles.label}>Drift (ms)</label>
+            <input
+              type="number"
+              style={inspectorStyles.input}
+              value={driftMs}
+              onChange={(e) => handleDriftChange(e.target.value)}
+              onBlur={handleDriftBlur}
+              onKeyDown={(e) => e.key === 'Enter' && handleDriftBlur()}
+            />
+          </div>
+
+          {/* In Point */}
+          <div style={inspectorStyles.field}>
+            <label style={inspectorStyles.label}>In Point (s)</label>
+            <input
+              type="number"
+              step="0.001"
+              min="0"
+              style={inspectorStyles.input}
+              value={inPoint}
+              onChange={(e) => handleInPointChange(e.target.value)}
+              onBlur={handleInPointBlur}
+              onKeyDown={(e) => e.key === 'Enter' && handleInPointBlur()}
+            />
+          </div>
+
+          {/* Out Point */}
+          <div style={inspectorStyles.field}>
+            <label style={inspectorStyles.label}>Out Point (s)</label>
+            <input
+              type="number"
+              step="0.001"
+              min="0"
+              style={inspectorStyles.input}
+              value={outPoint}
+              onChange={(e) => handleOutPointChange(e.target.value)}
+              onBlur={handleOutPointBlur}
+              onKeyDown={(e) => e.key === 'Enter' && handleOutPointBlur()}
+            />
+          </div>
+
+          {/* Duration (Read-only) */}
+          <div style={inspectorStyles.field}>
+            <label style={inspectorStyles.label}>Duration</label>
+            <div style={inspectorStyles.readOnly}>{duration.toFixed(3)}s</div>
+          </div>
+        </div>
+
+        {/* Playback Section */}
+        <div style={inspectorStyles.section}>
+          <div style={inspectorStyles.sectionTitle}>Playback</div>
+
+          {/* Playback Rate */}
+          <div style={inspectorStyles.field}>
+            <label style={inspectorStyles.label}>Speed</label>
+            <div style={inspectorStyles.inputGroup}>
+              <input
+                type="number"
+                step="0.1"
+                min="0.1"
+                max="4"
+                style={{ ...inspectorStyles.input, flex: 1 }}
+                value={playbackRate}
+                onChange={(e) => handlePlaybackRateChange(e.target.value)}
+                onBlur={handlePlaybackRateBlur}
+                onKeyDown={(e) => e.key === 'Enter' && handlePlaybackRateBlur()}
+              />
+              <span style={inspectorStyles.inputSuffix}>x</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Debug Info */}
+        <div style={inspectorStyles.section}>
+          <div style={inspectorStyles.sectionTitle}>Debug</div>
+          <div style={inspectorStyles.debugInfo}>
+            <div>ID: {node.id.slice(0, 8)}...</div>
+            <div>Parent: {node.parent_id?.slice(0, 8) || 'none'}...</div>
+          </div>
         </div>
       </div>
     </div>
@@ -1675,6 +1990,101 @@ const timelineStyles: Record<string, React.CSSProperties> = {
     fontSize: '9px',
     color: '#3c3c3c',
     marginTop: '4px'
+  }
+}
+
+const inspectorStyles: Record<string, React.CSSProperties> = {
+  content: {
+    flex: 1,
+    overflow: 'auto',
+    padding: '12px'
+  },
+  section: {
+    marginBottom: '16px',
+    paddingBottom: '12px',
+    borderBottom: '1px solid #2d2d2d'
+  },
+  sectionTitle: {
+    fontSize: '10px',
+    fontWeight: 600,
+    textTransform: 'uppercase',
+    letterSpacing: '0.5px',
+    color: '#606060',
+    marginBottom: '8px'
+  },
+  nodeHeader: {
+    display: 'flex',
+    gap: '6px',
+    marginBottom: '6px'
+  },
+  typeBadge: {
+    fontSize: '9px',
+    fontWeight: 700,
+    color: '#ffffff',
+    padding: '2px 6px',
+    borderRadius: '3px'
+  },
+  anchorBadge: {
+    fontSize: '9px',
+    fontWeight: 600,
+    color: '#808080',
+    padding: '2px 6px',
+    backgroundColor: '#252526',
+    borderRadius: '3px'
+  },
+  fileName: {
+    fontSize: '12px',
+    fontWeight: 500,
+    color: '#cccccc',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    marginBottom: '4px'
+  },
+  mediaMeta: {
+    fontSize: '10px',
+    color: '#606060'
+  },
+  field: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: '8px'
+  },
+  label: {
+    fontSize: '11px',
+    color: '#808080'
+  },
+  input: {
+    width: '80px',
+    padding: '4px 8px',
+    backgroundColor: '#1e1e1e',
+    border: '1px solid #3c3c3c',
+    borderRadius: '3px',
+    color: '#cccccc',
+    fontSize: '11px',
+    textAlign: 'right' as const,
+    outline: 'none'
+  },
+  inputGroup: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px'
+  },
+  inputSuffix: {
+    fontSize: '11px',
+    color: '#606060'
+  },
+  readOnly: {
+    fontSize: '11px',
+    color: '#606060',
+    fontFamily: 'monospace'
+  },
+  debugInfo: {
+    fontSize: '9px',
+    color: '#4a4a4a',
+    fontFamily: 'monospace',
+    lineHeight: 1.6
   }
 }
 

@@ -35,7 +35,18 @@ const api = {
     targetNodeId?: string,
     anchorType?: 'append' | 'stack' | 'prepend'
   ): Promise<unknown> =>
-    ipcRenderer.invoke('node:create', { canvasId, mediaId, targetNodeId, anchorType })
+    ipcRenderer.invoke('node:create', { canvasId, mediaId, targetNodeId, anchorType }),
+
+  // Node Update API (Doc I: Inspector-driven updates)
+  updateNode: (
+    nodeId: string,
+    updates: {
+      drift?: number
+      media_in_point?: number
+      media_out_point?: number | null
+      playback_rate?: number
+    }
+  ): Promise<unknown> => ipcRenderer.invoke('node:update', { nodeId, updates })
 }
 
 // Use `contextBridge` APIs to expose Electron APIs to

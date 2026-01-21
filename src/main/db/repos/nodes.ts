@@ -349,3 +349,110 @@ export function getNodeById(nodeId: string): StoryNode | null {
     internal_state_map: row.internal_state_map ? JSON.parse(row.internal_state_map) : null
   }
 }
+
+/**
+ * Payload for updating an existing node
+ * All fields are optional - only provided fields will be updated
+ */
+export interface UpdateNodePayload {
+  drift?: number
+  media_in_point?: number
+  media_out_point?: number | null
+  playback_rate?: number
+  ui_track_lane?: number | null
+  parent_id?: string | null
+  anchor_type?: AnchorType | null
+  active_channels?: number[] | null
+  transition_in_type?: string | null
+  transition_in_duration?: number
+}
+
+/**
+ * Updates an existing node with the provided fields.
+ *
+ * Doc I: Inspector-driven updates for Drift, In/Out Points, etc.
+ * This triggers re-calculation of the Topology (Snowplow effect).
+ *
+ * @param nodeId - The UUID of the node to update
+ * @param updates - Partial payload with fields to update
+ * @returns The updated StoryNode
+ * @throws Error if node not found
+ */
+export function updateNode(nodeId: string, updates: UpdateNodePayload): StoryNode {
+  const db = getDB()
+
+  // Build dynamic UPDATE statement based on provided fields
+  const setClauses: string[] = []
+  const values: unknown[] = []
+
+  if (updates.drift !== undefined) {
+    setClauses.push('drift = ?')
+    values.push(updates.drift)
+  }
+  if (updates.media_in_point !== undefined) {
+    setClauses.push('media_in_point = ?')
+    values.push(updates.media_in_point)
+  }
+  if (updates.media_out_point !== undefined) {
+    setClauses.push('media_out_point = ?')
+    values.push(updates.media_out_point)
+  }
+  if (updates.playback_rate !== undefined) {
+    setClauses.push('playback_rate = ?')
+    values.push(updates.playback_rate)
+  }
+  if (updates.ui_track_lane !== undefined) {
+    setClauses.push('ui_track_lane = ?')
+    values.push(updates.ui_track_lane)
+  }
+  if (updates.parent_id !== undefined) {
+    setClauses.push('parent_id = ?')
+    values.push(updates.parent_id)
+  }
+  if (updates.anchor_type !== undefined) {
+    setClauses.push('anchor_type = ?')
+    values.push(updates.anchor_type)
+  }
+  if (updates.active_channels !== undefined) {
+    setClauses.push('active_channels = ?')
+    values.push(updates.active_channels ? JSON.stringify(updates.active_channels) : null)
+  }
+  if (updates.transition_in_type !== undefined) {
+    setClauses.push('transition_in_type = ?')
+    values.push(updates.transition_in_type)
+  }
+  if (updates.transition_in_duration !== undefined) {
+    setClauses.push('transition_in_duration = ?')
+    values.push(updates.transition_in_duration)
+  }
+
+  if (setClauses.length === 0) {
+    // No updates provided, just return the existing node
+    const existing = getNodeById(nodeId)
+    if (!existing) {
+      throw new Error(`[Node] Node not found: ${nodeId}`)
+    }
+    return existing
+  }
+
+  // Add nodeId to values for WHERE clause
+  values.push(nodeId)
+
+  const sql = `UPDATE nodes SET ${setClauses.join(', ')} WHERE id = ?`
+  const stmt = db.prepare(sql)
+  const result = stmt.run(...values)
+
+  if (result.changes === 0) {
+    throw new Error(`[Node] Node not found: ${nodeId}`)
+  }
+
+  console.log(`[Node] Updated node ${nodeId}:`, updates)
+
+  // Return the freshly updated node
+  const updated = getNodeById(nodeId)
+  if (!updated) {
+    throw new Error(`[Node] Failed to retrieve updated node: ${nodeId}`)
+  }
+
+  return updated
+}
