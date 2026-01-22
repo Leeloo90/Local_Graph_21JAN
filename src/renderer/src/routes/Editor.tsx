@@ -1102,26 +1102,185 @@ interface InspectorPanelProps {
 }
 
 function InspectorPanel({ node, media, onUpdate }: InspectorPanelProps): React.JSX.Element {
-  // Local state for input fields (Doc I: Inspector-driven updates)
-  const [driftMs, setDriftMs] = useState<string>('')
-  const [inPoint, setInPoint] = useState<string>('')
-  const [outPoint, setOutPoint] = useState<string>('')
-  const [playbackRate, setPlaybackRate] = useState<string>('')
+  // Video player ref and state
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [isPlaying, setIsPlaying] = useState(false)
+  const [isLooping, setIsLooping] = useState(false)
+  const [currentVideoTime, setCurrentVideoTime] = useState(0)
+  const [videoDuration, setVideoDuration] = useState(0)
+  const [isScrubbing, setIsScrubbing] = useState(false)
 
-  // Sync local state when node changes
+  // Flash state for visual feedback on Mark I/O
+  const [inFlash, setInFlash] = useState(false)
+  const [outFlash, setOutFlash] = useState(false)
+
+  // Local state for drift input (still editable)
+  const [driftMs, setDriftMs] = useState<string>('')
+
+  // Build media URL using custom protocol
+  // Don't encode the entire path - the protocol handler will decode it
+  // Only encode special characters that could break the URL (spaces, etc.)
+  const mediaUrl = useMemo(() => {
+    if (!media?.file_path) return null
+    // Use the file path directly - spaces and special chars are handled by the protocol
+    return `media://${media.file_path}`
+  }, [media?.file_path])
+
+  // "Park" feature: When node changes, seek video to in-point
+  useEffect(() => {
+    if (videoRef.current && node) {
+      videoRef.current.currentTime = node.media_in_point
+      setCurrentVideoTime(node.media_in_point)
+      setIsPlaying(false)
+      videoRef.current.pause()
+    }
+  }, [node?.id]) // Only trigger when node ID changes
+
+  // Sync drift state when node changes
   useEffect(() => {
     if (node) {
       setDriftMs((node.drift * 1000).toString()) // Convert seconds to ms
-      setInPoint(node.media_in_point.toFixed(3))
-      setOutPoint(node.media_out_point?.toFixed(3) ?? '')
-      setPlaybackRate(node.playback_rate.toFixed(2))
     } else {
       setDriftMs('')
-      setInPoint('')
-      setOutPoint('')
-      setPlaybackRate('')
     }
   }, [node])
+
+  // Video timeupdate handler - sync current time display
+  const handleTimeUpdate = useCallback(() => {
+    if (videoRef.current) {
+      setCurrentVideoTime(videoRef.current.currentTime)
+
+      // Loop within in/out range if looping enabled
+      if (isLooping && node?.media_out_point) {
+        if (videoRef.current.currentTime >= node.media_out_point) {
+          videoRef.current.currentTime = node.media_in_point
+        }
+      }
+    }
+  }, [isLooping, node?.media_in_point, node?.media_out_point])
+
+  // Play/Pause toggle
+  const togglePlayPause = useCallback(() => {
+    if (!videoRef.current) return
+    if (isPlaying) {
+      videoRef.current.pause()
+      setIsPlaying(false)
+    } else {
+      videoRef.current.play()
+      setIsPlaying(true)
+    }
+  }, [isPlaying])
+
+  // Mark In - Professional NLE style (Doc I)
+  const markIn = useCallback(() => {
+    if (!node || !videoRef.current) return
+    const currentTime = videoRef.current.currentTime
+    console.log(`[Inspector] Mark IN at ${currentTime.toFixed(3)}s`)
+    onUpdate(node.id, { media_in_point: currentTime })
+    // Visual feedback
+    setInFlash(true)
+    setTimeout(() => setInFlash(false), 200)
+  }, [node, onUpdate])
+
+  // Mark Out - Professional NLE style (Doc I)
+  const markOut = useCallback(() => {
+    if (!node || !videoRef.current) return
+    const currentTime = videoRef.current.currentTime
+    // Ensure out is after in
+    if (currentTime <= node.media_in_point) {
+      console.warn('[Inspector] Out point must be after In point')
+      return
+    }
+    console.log(`[Inspector] Mark OUT at ${currentTime.toFixed(3)}s`)
+    onUpdate(node.id, { media_out_point: currentTime })
+    // Visual feedback
+    setOutFlash(true)
+    setTimeout(() => setOutFlash(false), 200)
+  }, [node, onUpdate])
+
+  // Go to In Point
+  const goToIn = useCallback(() => {
+    if (!node || !videoRef.current) return
+    videoRef.current.currentTime = node.media_in_point
+    setCurrentVideoTime(node.media_in_point)
+  }, [node])
+
+  // Go to Out Point
+  const goToOut = useCallback(() => {
+    if (!node || !videoRef.current || !node.media_out_point) return
+    videoRef.current.currentTime = node.media_out_point
+    setCurrentVideoTime(node.media_out_point)
+  }, [node])
+
+  // Handle video loaded metadata - get duration
+  const handleLoadedMetadata = useCallback(() => {
+    if (videoRef.current) {
+      setVideoDuration(videoRef.current.duration)
+    }
+  }, [])
+
+  // Scrubber click handler
+  const handleScrubberClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (!videoRef.current || videoDuration === 0) return
+    const rect = e.currentTarget.getBoundingClientRect()
+    const clickX = e.clientX - rect.left
+    const percentage = clickX / rect.width
+    const newTime = percentage * videoDuration
+    videoRef.current.currentTime = newTime
+    setCurrentVideoTime(newTime)
+  }, [videoDuration])
+
+  // Scrubber mouse down - start scrubbing
+  const handleScrubberMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    setIsScrubbing(true)
+    handleScrubberClick(e)
+  }, [handleScrubberClick])
+
+  // Scrubber mouse move - continue scrubbing
+  const handleScrubberMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (!isScrubbing) return
+    handleScrubberClick(e)
+  }, [isScrubbing, handleScrubberClick])
+
+  // Scrubber mouse up - stop scrubbing
+  const handleScrubberMouseUp = useCallback(() => {
+    setIsScrubbing(false)
+  }, [])
+
+  // Global mouse up listener to stop scrubbing when mouse released anywhere
+  useEffect(() => {
+    const handleGlobalMouseUp = () => setIsScrubbing(false)
+    if (isScrubbing) {
+      window.addEventListener('mouseup', handleGlobalMouseUp)
+      return () => window.removeEventListener('mouseup', handleGlobalMouseUp)
+    }
+  }, [isScrubbing])
+
+  // Keyboard handler for I, O, Space (Doc I: Professional NLE shortcuts)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Only handle if no input is focused
+      const activeElement = document.activeElement
+      const isInputFocused = activeElement?.tagName === 'INPUT' || activeElement?.tagName === 'TEXTAREA'
+
+      if (isInputFocused || !node || !media) return
+
+      if (e.code === 'Space') {
+        e.preventDefault()
+        togglePlayPause()
+      } else if (e.key === 'i' || e.key === 'I') {
+        e.preventDefault()
+        markIn()
+      } else if (e.key === 'o' || e.key === 'O') {
+        e.preventDefault()
+        markOut()
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [togglePlayPause, markIn, markOut, node, media])
 
   // Calculate duration (read-only)
   const duration = useMemo(() => {
@@ -1136,7 +1295,7 @@ function InspectorPanel({ node, media, onUpdate }: InspectorPanelProps): React.J
     return media.file_path.split('/').pop()?.split('\\').pop() || media.file_path
   }, [media])
 
-  // Handle field updates
+  // Handle drift updates
   const handleDriftChange = useCallback((value: string) => {
     setDriftMs(value)
   }, [])
@@ -1152,51 +1311,12 @@ function InspectorPanel({ node, media, onUpdate }: InspectorPanelProps): React.J
     }
   }, [node, driftMs, onUpdate])
 
-  const handleInPointChange = useCallback((value: string) => {
-    setInPoint(value)
-  }, [])
-
-  const handleInPointBlur = useCallback(() => {
-    if (!node) return
-    const seconds = parseFloat(inPoint)
-    if (!isNaN(seconds) && seconds >= 0 && seconds !== node.media_in_point) {
-      onUpdate(node.id, { media_in_point: seconds })
-    }
-  }, [node, inPoint, onUpdate])
-
-  const handleOutPointChange = useCallback((value: string) => {
-    setOutPoint(value)
-  }, [])
-
-  const handleOutPointBlur = useCallback(() => {
-    if (!node) return
-    const seconds = parseFloat(outPoint)
-    if (!isNaN(seconds) && seconds >= 0) {
-      const newOut = seconds > node.media_in_point ? seconds : null
-      if (newOut !== node.media_out_point) {
-        onUpdate(node.id, { media_out_point: newOut })
-      }
-    }
-  }, [node, outPoint, onUpdate])
-
-  const handlePlaybackRateChange = useCallback((value: string) => {
-    setPlaybackRate(value)
-  }, [])
-
-  const handlePlaybackRateBlur = useCallback(() => {
-    if (!node) return
-    const rate = parseFloat(playbackRate)
-    if (!isNaN(rate) && rate > 0 && rate !== node.playback_rate) {
-      onUpdate(node.id, { playback_rate: rate })
-    }
-  }, [node, playbackRate, onUpdate])
-
   // No selection - show empty state
   if (!node) {
     return (
       <div style={panelStyles.container}>
         <div style={panelStyles.header}>
-          <span style={panelStyles.title}>Inspector</span>
+          <span style={panelStyles.title}>Source Monitor</span>
         </div>
         <div style={panelStyles.content}>
           <div style={panelStyles.placeholder}>
@@ -1219,12 +1339,13 @@ function InspectorPanel({ node, media, onUpdate }: InspectorPanelProps): React.J
   const isSatellite = node.type === 'SATELLITE'
   const typeColor = isSatellite ? '#06B6D4' : '#A855F7'
   const trackLabel = `V${(node.ui_track_lane ?? 0) + 1}`
+  const fps = media?.fps ?? 24
 
   return (
-    <div style={panelStyles.container}>
+    <div ref={containerRef} style={panelStyles.container} tabIndex={0}>
       {/* Header */}
       <div style={panelStyles.header}>
-        <span style={panelStyles.title}>Inspector</span>
+        <span style={panelStyles.title}>Source Monitor</span>
         <span
           style={{
             fontSize: '9px',
@@ -1239,9 +1360,194 @@ function InspectorPanel({ node, media, onUpdate }: InspectorPanelProps): React.J
         </span>
       </div>
 
-      {/* Inspector Content */}
-      <div style={inspectorStyles.content}>
-        {/* Node Header Section */}
+      {/* Video Player Section (Top 50%) */}
+      <div style={inspectorStyles.playerSection}>
+        {mediaUrl ? (
+          <video
+            ref={videoRef}
+            src={mediaUrl}
+            style={inspectorStyles.video}
+            onTimeUpdate={handleTimeUpdate}
+            onLoadedMetadata={handleLoadedMetadata}
+            onEnded={() => setIsPlaying(false)}
+            onPause={() => setIsPlaying(false)}
+            onPlay={() => setIsPlaying(true)}
+          />
+        ) : (
+          <div style={inspectorStyles.videoPlaceholder}>
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
+              <rect x="2" y="2" width="20" height="20" rx="2" />
+              <polygon points="10 8 16 12 10 16 10 8" />
+            </svg>
+            <span>No Media</span>
+          </div>
+        )}
+
+        {/* Scrubber Bar / Playhead */}
+        <div
+          style={inspectorStyles.scrubberContainer}
+          onMouseDown={handleScrubberMouseDown}
+          onMouseMove={handleScrubberMouseMove}
+          onMouseUp={handleScrubberMouseUp}
+        >
+          {/* In/Out range indicator */}
+          {node && videoDuration > 0 && (
+            <div
+              style={{
+                ...inspectorStyles.scrubberRange,
+                left: `${(node.media_in_point / videoDuration) * 100}%`,
+                width: `${(((node.media_out_point ?? videoDuration) - node.media_in_point) / videoDuration) * 100}%`
+              }}
+            />
+          )}
+          {/* Progress bar (played portion) */}
+          <div
+            style={{
+              ...inspectorStyles.scrubberProgress,
+              width: videoDuration > 0 ? `${(currentVideoTime / videoDuration) * 100}%` : '0%'
+            }}
+          />
+          {/* Playhead */}
+          <div
+            style={{
+              ...inspectorStyles.scrubberPlayhead,
+              left: videoDuration > 0 ? `${(currentVideoTime / videoDuration) * 100}%` : '0%'
+            }}
+          />
+        </div>
+
+        {/* Timecode Display Bar */}
+        <div style={inspectorStyles.timecodeBar}>
+          <div style={inspectorStyles.mainTimecode}>
+            {formatTimecode(currentVideoTime, fps)}
+          </div>
+        </div>
+
+        {/* Transport Controls */}
+        <div style={inspectorStyles.transportBar}>
+          {/* Mark In Button */}
+          <button
+            style={{
+              ...inspectorStyles.markButton,
+              backgroundColor: inFlash ? '#22C55E' : '#252526'
+            }}
+            onClick={markIn}
+            title="Mark In (I)"
+          >
+            <span style={inspectorStyles.markBracket}>[</span>
+            <span style={inspectorStyles.markLabel}>IN</span>
+          </button>
+
+          {/* Go to In */}
+          <button
+            style={inspectorStyles.transportButton}
+            onClick={goToIn}
+            title="Go to In Point"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <polygon points="19 20 9 12 19 4 19 20" />
+              <rect x="5" y="4" width="2" height="16" />
+            </svg>
+          </button>
+
+          {/* Play/Pause */}
+          <button
+            style={inspectorStyles.transportButton}
+            onClick={togglePlayPause}
+            title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
+          >
+            {isPlaying ? (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                <rect x="6" y="4" width="4" height="16" />
+                <rect x="14" y="4" width="4" height="16" />
+              </svg>
+            ) : (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                <polygon points="5 3 19 12 5 21 5 3" />
+              </svg>
+            )}
+          </button>
+
+          {/* Go to Out */}
+          <button
+            style={inspectorStyles.transportButton}
+            onClick={goToOut}
+            title="Go to Out Point"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <polygon points="5 4 15 12 5 20 5 4" />
+              <rect x="17" y="4" width="2" height="16" />
+            </svg>
+          </button>
+
+          {/* Mark Out Button */}
+          <button
+            style={{
+              ...inspectorStyles.markButton,
+              backgroundColor: outFlash ? '#22C55E' : '#252526'
+            }}
+            onClick={markOut}
+            title="Mark Out (O)"
+          >
+            <span style={inspectorStyles.markLabel}>OUT</span>
+            <span style={inspectorStyles.markBracket}>]</span>
+          </button>
+
+          {/* Loop Toggle */}
+          <button
+            style={{
+              ...inspectorStyles.transportButton,
+              backgroundColor: isLooping ? '#0e639c' : '#252526',
+              marginLeft: 'auto'
+            }}
+            onClick={() => setIsLooping(!isLooping)}
+            title="Loop In/Out Range"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polyline points="17 1 21 5 17 9" />
+              <path d="M3 11V9a4 4 0 0 1 4-4h14" />
+              <polyline points="7 23 3 19 7 15" />
+              <path d="M21 13v2a4 4 0 0 1-4 4H3" />
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      {/* Inspector Controls Section (Bottom 50%) */}
+      <div style={inspectorStyles.controlsSection}>
+        {/* In/Out Timecodes Display */}
+        <div style={inspectorStyles.trimSection}>
+          <div
+            style={{
+              ...inspectorStyles.trimPoint,
+              borderColor: inFlash ? '#22C55E' : '#3c3c3c'
+            }}
+            onClick={goToIn}
+          >
+            <span style={inspectorStyles.trimLabel}>IN</span>
+            <span style={inspectorStyles.trimTimecode}>
+              {formatTimecode(node.media_in_point, fps)}
+            </span>
+          </div>
+          <div style={inspectorStyles.trimDuration}>
+            <span style={inspectorStyles.durationLabel}>DUR</span>
+            <span style={inspectorStyles.durationValue}>{duration.toFixed(2)}s</span>
+          </div>
+          <div
+            style={{
+              ...inspectorStyles.trimPoint,
+              borderColor: outFlash ? '#22C55E' : '#3c3c3c'
+            }}
+            onClick={goToOut}
+          >
+            <span style={inspectorStyles.trimLabel}>OUT</span>
+            <span style={inspectorStyles.trimTimecode}>
+              {node.media_out_point ? formatTimecode(node.media_out_point, fps) : '--:--:--:--'}
+            </span>
+          </div>
+        </div>
+
+        {/* Node Info Section */}
         <div style={inspectorStyles.section}>
           <div style={inspectorStyles.nodeHeader}>
             <span
@@ -1259,17 +1565,13 @@ function InspectorPanel({ node, media, onUpdate }: InspectorPanelProps): React.J
           </div>
           {media?.duration_sec && (
             <div style={inspectorStyles.mediaMeta}>
-              Media: {media.duration_sec.toFixed(2)}s
-              {media.fps && ` @ ${media.fps.toFixed(2)} fps`}
+              Source: {media.duration_sec.toFixed(2)}s @ {fps.toFixed(2)} fps
             </div>
           )}
         </div>
 
-        {/* Timing Section */}
+        {/* Drift Control */}
         <div style={inspectorStyles.section}>
-          <div style={inspectorStyles.sectionTitle}>Timing</div>
-
-          {/* Drift */}
           <div style={inspectorStyles.field}>
             <label style={inspectorStyles.label}>Drift (ms)</label>
             <input
@@ -1281,74 +1583,28 @@ function InspectorPanel({ node, media, onUpdate }: InspectorPanelProps): React.J
               onKeyDown={(e) => e.key === 'Enter' && handleDriftBlur()}
             />
           </div>
-
-          {/* In Point */}
-          <div style={inspectorStyles.field}>
-            <label style={inspectorStyles.label}>In Point (s)</label>
-            <input
-              type="number"
-              step="0.001"
-              min="0"
-              style={inspectorStyles.input}
-              value={inPoint}
-              onChange={(e) => handleInPointChange(e.target.value)}
-              onBlur={handleInPointBlur}
-              onKeyDown={(e) => e.key === 'Enter' && handleInPointBlur()}
-            />
-          </div>
-
-          {/* Out Point */}
-          <div style={inspectorStyles.field}>
-            <label style={inspectorStyles.label}>Out Point (s)</label>
-            <input
-              type="number"
-              step="0.001"
-              min="0"
-              style={inspectorStyles.input}
-              value={outPoint}
-              onChange={(e) => handleOutPointChange(e.target.value)}
-              onBlur={handleOutPointBlur}
-              onKeyDown={(e) => e.key === 'Enter' && handleOutPointBlur()}
-            />
-          </div>
-
-          {/* Duration (Read-only) */}
-          <div style={inspectorStyles.field}>
-            <label style={inspectorStyles.label}>Duration</label>
-            <div style={inspectorStyles.readOnly}>{duration.toFixed(3)}s</div>
-          </div>
         </div>
 
-        {/* Playback Section */}
-        <div style={inspectorStyles.section}>
-          <div style={inspectorStyles.sectionTitle}>Playback</div>
-
-          {/* Playback Rate */}
-          <div style={inspectorStyles.field}>
-            <label style={inspectorStyles.label}>Speed</label>
-            <div style={inspectorStyles.inputGroup}>
-              <input
-                type="number"
-                step="0.1"
-                min="0.1"
-                max="4"
-                style={{ ...inspectorStyles.input, flex: 1 }}
-                value={playbackRate}
-                onChange={(e) => handlePlaybackRateChange(e.target.value)}
-                onBlur={handlePlaybackRateBlur}
-                onKeyDown={(e) => e.key === 'Enter' && handlePlaybackRateBlur()}
-              />
-              <span style={inspectorStyles.inputSuffix}>x</span>
-            </div>
+        {/* Keyboard Shortcuts Help */}
+        <div style={inspectorStyles.shortcutsSection}>
+          <div style={inspectorStyles.shortcutRow}>
+            <span style={inspectorStyles.shortcutKey}>I</span>
+            <span style={inspectorStyles.shortcutDesc}>Mark In</span>
+          </div>
+          <div style={inspectorStyles.shortcutRow}>
+            <span style={inspectorStyles.shortcutKey}>O</span>
+            <span style={inspectorStyles.shortcutDesc}>Mark Out</span>
+          </div>
+          <div style={inspectorStyles.shortcutRow}>
+            <span style={inspectorStyles.shortcutKey}>Space</span>
+            <span style={inspectorStyles.shortcutDesc}>Play/Pause</span>
           </div>
         </div>
 
         {/* Debug Info */}
-        <div style={inspectorStyles.section}>
-          <div style={inspectorStyles.sectionTitle}>Debug</div>
+        <div style={{ ...inspectorStyles.section, borderBottom: 'none' }}>
           <div style={inspectorStyles.debugInfo}>
             <div>ID: {node.id.slice(0, 8)}...</div>
-            <div>Parent: {node.parent_id?.slice(0, 8) || 'none'}...</div>
           </div>
         </div>
       </div>
@@ -1994,6 +2250,98 @@ const timelineStyles: Record<string, React.CSSProperties> = {
 }
 
 const inspectorStyles: Record<string, React.CSSProperties> = {
+  // Video player section (top 40%)
+  playerSection: {
+    height: '40%',
+    minHeight: '180px',
+    backgroundColor: '#000000',
+    display: 'flex',
+    flexDirection: 'column',
+    borderBottom: '1px solid #3c3c3c'
+  },
+  video: {
+    flex: 1,
+    width: '100%',
+    objectFit: 'contain',
+    backgroundColor: '#000000'
+  },
+  videoPlaceholder: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '8px',
+    color: '#3c3c3c',
+    fontSize: '11px'
+  },
+  // Scrubber / Playhead styles
+  scrubberContainer: {
+    position: 'relative',
+    height: '20px',
+    backgroundColor: '#1a1a1a',
+    cursor: 'pointer',
+    borderTop: '1px solid #2d2d2d'
+  },
+  scrubberRange: {
+    position: 'absolute',
+    top: '6px',
+    height: '8px',
+    backgroundColor: 'rgba(168, 85, 247, 0.3)',
+    borderRadius: '2px'
+  },
+  scrubberProgress: {
+    position: 'absolute',
+    top: '8px',
+    left: 0,
+    height: '4px',
+    backgroundColor: '#606060',
+    borderRadius: '2px'
+  },
+  scrubberPlayhead: {
+    position: 'absolute',
+    top: '2px',
+    width: '2px',
+    height: '16px',
+    backgroundColor: '#ffffff',
+    borderRadius: '1px',
+    transform: 'translateX(-1px)',
+    boxShadow: '0 0 4px rgba(255, 255, 255, 0.5)'
+  },
+  transportBar: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    padding: '6px 8px',
+    backgroundColor: '#1a1a1a',
+    borderTop: '1px solid #2d2d2d'
+  },
+  transportButton: {
+    width: '28px',
+    height: '28px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#252526',
+    border: '1px solid #3c3c3c',
+    borderRadius: '4px',
+    color: '#cccccc',
+    cursor: 'pointer',
+    transition: 'background-color 0.15s ease'
+  },
+  timecodeDisplay: {
+    flex: 1,
+    textAlign: 'right' as const,
+    fontSize: '11px',
+    fontFamily: 'monospace',
+    color: '#808080'
+  },
+  // Controls section (bottom 60%)
+  controlsSection: {
+    flex: 1,
+    overflow: 'auto',
+    padding: '12px'
+  },
   content: {
     flex: 1,
     overflow: 'auto',
@@ -2085,6 +2433,134 @@ const inspectorStyles: Record<string, React.CSSProperties> = {
     color: '#4a4a4a',
     fontFamily: 'monospace',
     lineHeight: 1.6
+  },
+  // Timecode bar styles
+  timecodeBar: {
+    display: 'flex',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: '4px 8px',
+    backgroundColor: '#0a0a0a',
+    borderTop: '1px solid #2d2d2d'
+  },
+  mainTimecode: {
+    fontSize: '18px',
+    fontFamily: 'monospace',
+    fontWeight: 600,
+    color: '#ffffff',
+    letterSpacing: '1px'
+  },
+  // Mark I/O button styles
+  markButton: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '2px',
+    padding: '4px 8px',
+    backgroundColor: '#252526',
+    border: '1px solid #3c3c3c',
+    borderRadius: '4px',
+    color: '#cccccc',
+    cursor: 'pointer',
+    fontSize: '11px',
+    fontWeight: 600,
+    transition: 'all 0.15s ease'
+  },
+  markBracket: {
+    fontSize: '14px',
+    fontWeight: 700,
+    color: '#808080'
+  },
+  markLabel: {
+    fontSize: '10px',
+    fontWeight: 600
+  },
+  // Trim section styles (In/Out display)
+  trimSection: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '8px',
+    marginBottom: '16px',
+    padding: '10px',
+    backgroundColor: '#1a1a1a',
+    borderRadius: '6px',
+    border: '1px solid #2d2d2d'
+  },
+  trimPoint: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '2px',
+    padding: '4px 8px',
+    minWidth: '70px',
+    borderRadius: '4px',
+    cursor: 'pointer',
+    transition: 'background-color 0.15s ease'
+  },
+  trimLabel: {
+    fontSize: '9px',
+    fontWeight: 600,
+    color: '#606060',
+    textTransform: 'uppercase',
+    letterSpacing: '0.5px'
+  },
+  trimTimecode: {
+    fontSize: '11px',
+    fontFamily: 'monospace',
+    fontWeight: 500,
+    color: '#cccccc'
+  },
+  trimDuration: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '2px'
+  },
+  durationLabel: {
+    fontSize: '9px',
+    fontWeight: 600,
+    color: '#606060',
+    textTransform: 'uppercase',
+    letterSpacing: '0.5px'
+  },
+  durationValue: {
+    fontSize: '12px',
+    fontFamily: 'monospace',
+    fontWeight: 600,
+    color: '#ffffff'
+  },
+  // Keyboard shortcuts section
+  shortcutsSection: {
+    marginBottom: '12px',
+    padding: '8px',
+    backgroundColor: '#1a1a1a',
+    borderRadius: '4px',
+    border: '1px solid #2d2d2d'
+  },
+  shortcutRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    marginBottom: '4px'
+  },
+  shortcutKey: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: '24px',
+    height: '20px',
+    padding: '0 6px',
+    backgroundColor: '#252526',
+    border: '1px solid #3c3c3c',
+    borderRadius: '3px',
+    fontSize: '10px',
+    fontFamily: 'monospace',
+    fontWeight: 600,
+    color: '#cccccc'
+  },
+  shortcutDesc: {
+    fontSize: '10px',
+    color: '#606060'
   }
 }
 

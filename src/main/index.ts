@@ -1,5 +1,6 @@
-import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, dialog, protocol, net } from 'electron'
 import { join } from 'path'
+import { pathToFileURL } from 'url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { initializeDatabase } from './db/init'
@@ -42,10 +43,49 @@ function createWindow(): void {
   }
 }
 
+// Register custom media:// protocol for secure local file access
+// Must be called BEFORE app.whenReady() per Electron docs
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'media',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      bypassCSP: true,
+      stream: true
+    }
+  }
+])
+
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
 app.whenReady().then(() => {
+  // Register media:// protocol handler for local file playback
+  // This allows the renderer to securely access local media files
+  protocol.handle('media', (request) => {
+    console.log('[Media Protocol] Request URL:', request.url)
+
+    // 1. Strip the scheme prefix
+    let filePath = request.url.slice('media://'.length)
+
+    // 2. Decode URI components (fixes %20 for spaces, etc.)
+    filePath = decodeURIComponent(filePath)
+
+    // 3. Handle Windows drive letters (Electron sometimes adds leading slash like /C:/...)
+    if (process.platform === 'win32' && filePath.startsWith('/') && !filePath.startsWith('//')) {
+      filePath = filePath.slice(1)
+    }
+
+    console.log('[Media Protocol] Serving file:', filePath)
+
+    // 4. Convert to file URL and fetch
+    const fileUrl = pathToFileURL(filePath).toString()
+    console.log('[Media Protocol] File URL:', fileUrl)
+
+    return net.fetch(fileUrl)
+  })
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.electron')
 
